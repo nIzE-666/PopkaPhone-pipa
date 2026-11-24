@@ -20,6 +20,7 @@ Item {
     property var xdgSurface
     property Item area                    // стол без панели
     property bool active: false
+    property bool pinned: false
     property bool minimized: false
     property bool maximized: false
     property bool panelMode: false
@@ -46,6 +47,16 @@ Item {
     function dragOver(p) {}
     function dropAt(p, paths) {}
     function takeFocus() { if (page.surface) page.takeFocus() }
+    function snapHalf(right) {
+        if (!area)
+            return
+        if (panelMode)
+            panelToggled()
+        maximized = false
+        const half = Math.floor(area.width / 2)
+        box = Qt.rect(right ? area.width - half : 0, 0, half, area.height)
+        saveRequested()
+    }
 
     // свернуть и вернуть — как окна НаомиОС: тает и чуть уменьшается
     visible: opacity > 0
@@ -166,29 +177,54 @@ Item {
             id: downloads
             layoutDirection: Qt.RightToLeft
             spacing: 6
-            x: panelButton.x - 6 - width
+            x: pinBtn.x - 6 - width
             y: 5
             Repeater {
                 model: win.st.downloads
                 delegate: WebDownload {
                     required property var modelData
                     info: modelData
-                    visible: panelButton.x - 6 - x - width >= 8 + DeskStyle.webGhostW + DeskStyle.itemGap + DeskStyle.webActiveMin
+                    visible: pinBtn.x - 6 - x - width >= 8 + DeskStyle.webGhostW + DeskStyle.itemGap + DeskStyle.webActiveMin
                     onActivated: win.downloadActivated(modelData)
                 }
             }
         }
 
         WinButton {
+            id: pinBtn
+            visible: DeskStyle.tablet
+            x: DeskStyle.tablet ? splitLeftBtn.x - 2 - width : panelButton.x
+            y: (DeskStyle.webBarH - height) / 2
+            glyph: "pin"
+            active: win.pinned
+            onClicked: { win.pinned = !win.pinned; win.activate() }
+        }
+        WinButton {
+            id: splitLeftBtn
+            visible: DeskStyle.tablet
+            x: DeskStyle.tablet ? splitRightBtn.x - 2 - width : panelButton.x
+            y: (DeskStyle.webBarH - height) / 2
+            glyph: "split-left"
+            onClicked: win.snapHalf(false)
+        }
+        WinButton {
+            id: splitRightBtn
+            visible: DeskStyle.tablet
+            x: DeskStyle.tablet ? panelButton.x - 2 - width : panelButton.x
+            y: (DeskStyle.webBarH - height) / 2
+            glyph: "split-right"
+            onClicked: win.snapHalf(true)
+        }
+        WinButton {
             id: panelButton
-            x: win.width - 6 - 2 * 30 - 2; y: 5
+            x: win.width - 8 - 2 * width; y: (DeskStyle.webBarH - height) / 2
             glyph: "panel"
             unit: 0.9545
             line: 1.5
             onClicked: win.panelToggled()
         }
         WinButton {
-            x: win.width - 6 - 30; y: 5
+            x: win.width - 6 - width; y: (DeskStyle.webBarH - height) / 2
             glyph: "close"
             danger: true
             unit: 5.25 / 4.5

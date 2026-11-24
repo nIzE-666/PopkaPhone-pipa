@@ -2,10 +2,12 @@
 
 #include "desktop_screen.h"
 
+#include <QClipboard>
 #include <QDateTime>
 #include <QDir>
 #include <QElapsedTimer>
 #include <QFile>
+#include <QGuiApplication>
 #include <QImageWriter>
 #include <QLoggingCategory>
 #include <QMutex>
@@ -169,7 +171,10 @@ void DeskShot::captured(QImage image)
             QFile::remove(part);
         qCInfo(lcDeskShot, "скриншот %s: %dx%d, миниатюра %lld мс, всё %lld мс", ok ? "сохранён" : "НЕ сохранён",
                rgb.width(), rgb.height(), thumbMs, t.elapsed());
-        QMetaObject::invokeMethod(this, [this, ok, thumb = std::move(thumb)]() mutable {
+        QMetaObject::invokeMethod(this, [this, ok, thumb = std::move(thumb), full = ok ? rgb : QImage()]() mutable {
+            if (ok && !full.isNull())
+                if (QClipboard *cb = QGuiApplication::clipboard())
+                    cb->setImage(full);
             finish(ok, std::move(thumb));
         }, Qt::QueuedConnection);
     });

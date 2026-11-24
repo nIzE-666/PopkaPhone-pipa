@@ -30,17 +30,23 @@ import Naomi.Ui
 
 Item {
     id: root
+    property bool tablet: false
     property alias langs: conf.langs    // ru-en | ru | en
     readonly property bool bothLangs: langs !== "ru" && langs !== "en"
     property string lang: "ru"          // ru | en
     property string userLang: "ru"      // язык, выбранный глобусом в обычном поле
+    property bool latinForced: false    // поле ImhLatinOnly временно переключило на en
     Settings {
         id: conf
         location: StandardPaths.writableLocation(StandardPaths.GenericConfigLocation) + "/naomi/keyboard.ini"
         category: "keyboard"
         property string langs: "ru-en"
     }
-    onLangsChanged: if (!bothLangs) userLang = lang = langs   // один язык — сразу он
+    onLangsChanged: if (!bothLangs) {
+        userLang = lang = langs   // один язык — сразу он
+        latinForced = false
+        syncToContext(lang)
+    }
     property bool symbols: false        // цифры и знаки
     property bool more: false           // вторая страница знаков (#+=)
     property int shift: 0               // 0 — строчные, 1 — одна заглавная, 2 — капс
@@ -50,24 +56,23 @@ Item {
     readonly property int openMs: 320
     readonly property int closeMs: 280
 
-    readonly property real s: width / 1125
-    readonly property real edge: 0             // от края экрана до крайней клавиши: до упора (на снимке iOS — 10,5),
-                                               // просьба пользователя — полоска над клавиатурой идёт от края до края
+    readonly property real s: tablet ? Math.min(width / 1125, 0.42) : width / 1125
+    readonly property real edge: tablet ? 12 : 0
     readonly property color pressedColor: "#34332e"   // нажатая клавиша и буква над пальцем — светлее клавиш
     readonly property real keyGap: 14 * s      // между клавишами в ряду: на снимке 18, уже — клавиши шире (просьба пользователя)
     readonly property real unit: (width - 2 * edge + keyGap) / 11   // шаг клавиши: русский ряд — 11 букв
-    readonly property real keyH: 130 * s       // на снимке 123, чуть выше — просьба пользователя
+    readonly property real keyH: tablet ? Math.max(44, 130 * s) : 130 * s
     readonly property real keyRadius: 15 * s   // скругление клавиши (по нему же — облачко ввода чата)
-    readonly property real gap: 33 * s         // между рядами: на снимке 39, чуть плотнее — просьба пользователя
+    readonly property real gap: tablet ? 8 : 33 * s
     readonly property real topPad: 22 * s
     readonly property real keysBottom: topPad + 4 * keyH + 3 * gap
     // Палец ложится ниже, чем человек целится. Замер пользователя (11 ноября 2026, фраза трижды, 72 буквы,
     // tools/kbtaps): касания ниже центра клавиши на 64 пикселя экрана в верхнем ряду, 38 — в среднем, 11 — в
     // нижнем; все 9 промахов — клавиша прямо под нужной. Точка касания поднимается на 30 пикселей экрана (31 —
     // снимка): промахов 1 из 72 (docs/KEYBOARD.md, «Попадание»). Клавиши на экране — где были
-    readonly property real touchLift: 31 * s
-    readonly property real iconsY: keysBottom + 119 * s   // середина ряда глобуса (на снимке — 119 ниже клавиш)
-    implicitHeight: keysBottom + 239 * s                  // внизу — полоса жеста «домой» оболочки
+    readonly property real touchLift: tablet ? 0 : 31 * s
+    readonly property real iconsY: keysBottom + (tablet ? 26 : 119 * s)
+    implicitHeight: keysBottom + (tablet ? 52 : 239 * s)
 
     readonly property var letters: ({
         ru: ["йцукенгшщзх", "фывапролджэ", "ячсмитьбю"],
@@ -216,13 +221,31 @@ Item {
         }
         }
     }
+    function syncFromContext() {
+        if (!tablet || !bothLangs || !naomiKeyboard)
+            return
+        const ctxLang = naomiKeyboard.layout.toLowerCase()
+        if ((ctxLang !== "ru" && ctxLang !== "en") || ctxLang === lang)
+            return
+        resetWord()
+        lang = ctxLang
+        latinForced = false
+        if (!(naomiKeyboard.hints() & Qt.ImhLatinOnly))
+            userLang = ctxLang
+    }
+    function syncToContext(code) {
+        if (tablet && naomiKeyboard && (code === "ru" || code === "en"))
+            naomiKeyboard.setLayout(code.toUpperCase())
+    }
     function switchLang() {
         if (!bothLangs)
             return
         resetWord()
         lang = lang === "ru" ? "en" : "ru"
+        latinForced = false
         if (!(naomiKeyboard.hints() & Qt.ImhLatinOnly))
             userLang = lang
+        syncToContext(lang)
     }
 
     // ---------- исправление опечаток ----------
@@ -232,9 +255,11 @@ Item {
     property var undo: null        // {original, replaced}: только что исправили — «стереть» вернёт набранное
     property bool shiftAuto: false // заглавную поставила сама клавиатура (начало предложения)
     property bool capAuto: false   // первая буква слова — такой заглавной
-    readonly property bool predict: (naomiKeyboard.hints() & (Qt.ImhHiddenText | Qt.ImhSensitiveData
-        | Qt.ImhNoPredictiveText | Qt.ImhUrlCharactersOnly | Qt.ImhEmailCharactersOnly | Qt.ImhDigitsOnly
-        | Qt.ImhDialableCharactersOnly)) === 0 && visible
+    function canPredict() {
+        return visible && (naomiKeyboard.hints() & (Qt.ImhHiddenText | Qt.ImhSensitiveData
+            | Qt.ImhNoPredictiveText | Qt.ImhUrlCharactersOnly | Qt.ImhEmailCharactersOnly | Qt.ImhDigitsOnly
+            | Qt.ImhDialableCharactersOnly)) === 0
+    }
     // центры букв и разброс касаний — движку (σ: 0,45 шага клавиш и 0,38 шага рядов — подобрано пробой)
     function spellKeys() {
         if (!symbols)
@@ -245,7 +270,12 @@ Item {
     onKeysChanged: spellKeys()
     Component.onCompleted: {
         spellKeys()
-        if (!bothLangs) userLang = lang = langs   // один язык — сразу он
+        if (!bothLangs) {
+            userLang = lang = langs   // один язык — сразу он
+            syncToContext(lang)
+        } else {
+            syncFromContext()
+        }
     }
 
     function resetWord() {
@@ -262,7 +292,7 @@ Item {
             if (!typed.length)
                 capAuto = shift === 1 && shiftAuto
             type(t)
-            if (!predict)
+            if (!canPredict())
                 return
             word = word.concat([{ x: x, y: y, ch: t, exact: exact }])
             typed += t
@@ -278,7 +308,7 @@ Item {
     }
     // конец слова: исправить, если уверены (tail — пробел или знак — дописать тем же событием)
     function finishWord(tail) {
-        if (!typed.length || !predict) {
+        if (!typed.length || !canPredict()) {
             resetWord()
             return false
         }
@@ -320,6 +350,8 @@ Item {
         const h = held[id]
         if (!h || padActive || !naomiKeyboard.trackStart())
             return
+        if (typeof naomiHaptics !== "undefined" && naomiHaptics)
+            naomiHaptics.tap(30)   // пробел стал тачпадом — отклик подлиннее
         padId = id
         h.used = true
         hold.stop()
@@ -348,6 +380,9 @@ Item {
         const i = keyAt(x, y)
         if (i < 0)
             return
+        // отклик вибромотором (haptics.h); его нет вне оболочки и на телефоне без мотора
+        if (typeof naomiHaptics !== "undefined" && naomiHaptics)
+            naomiHaptics.tap(12)
         const kind = keys[i].kind
         if (kind === "mode" || kind === "more") {   // страница — сразу по касанию (как в iOS), не по отпусканию
             activate(keys[i], x, y)
@@ -441,9 +476,44 @@ Item {
         if (visible) {
             symbols = false
             more = false
-            lang = naomiKeyboard.hints() & Qt.ImhLatinOnly ? "en" : userLang
+            if (tablet && bothLangs && naomiKeyboard) {
+                const ctxLang = naomiKeyboard.layout.toLowerCase()
+                if (ctxLang === "ru" || ctxLang === "en")
+                    userLang = ctxLang
+            }
+            const latinOnly = (naomiKeyboard.hints() & Qt.ImhLatinOnly) !== 0
+            latinForced = latinOnly && userLang !== "en"
+            lang = latinOnly ? "en" : userLang
+            syncToContext(lang)
             if (shift !== 2)
                 autoShift()
+        } else if (latinForced) {
+            latinForced = false
+            syncToContext(userLang)
+        }
+    }
+    Connections {
+        target: naomiKeyboard
+        function onLayoutChanged() { root.syncFromContext() }
+        function onFocusObjectChanged() {
+            if (!root.visible)
+                return
+            root.resetWord()
+            root.undo = null
+            if (root.tablet && root.bothLangs) {
+                const latinOnly = (naomiKeyboard.hints() & Qt.ImhLatinOnly) !== 0
+                if (latinOnly && root.lang !== "en") {
+                    root.latinForced = true
+                    root.lang = "en"
+                    root.syncToContext("en")
+                } else if (!latinOnly && root.latinForced) {
+                    root.latinForced = false
+                    root.lang = root.userLang
+                    root.syncToContext(root.userLang)
+                }
+            }
+            if (root.shift !== 2)
+                root.autoShift()
         }
     }
 
@@ -479,6 +549,8 @@ Item {
         anchors.fill: parent
         color: Theme.canvas
         Rectangle { width: parent.width; height: 1; color: Theme.surfaceHigh }
+        Rectangle { visible: root.tablet; width: 1; height: parent.height; color: Theme.surfaceHigh }
+        Rectangle { visible: root.tablet; x: parent.width - 1; width: 1; height: parent.height; color: Theme.surfaceHigh }
     }
 
     Repeater {   // все страницы созданы заранее, видна одна (page)
@@ -592,7 +664,7 @@ Item {
         Text {
             required property var modelData
             visible: modelData.act !== "lang" || root.bothLangs   // один язык — глобуса нет
-            x: modelData.cx * root.s - width / 2
+            x: modelData.cx * root.width / 1125 - width / 2
             y: root.iconsY - height / 2
             font.family: "Material Symbols Rounded"
             font.pixelSize: 30

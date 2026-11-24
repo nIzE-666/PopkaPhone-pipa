@@ -25,6 +25,236 @@
 #    — остановок 0.
 set -u
 
+pipa_composer() {
+    candidate=
+    for service in vendor.qti.hardware.display.composer vendor.qti.hardware.display.composer-service; do
+        state=$(getprop "init.svc.$service" 2>/dev/null)
+        if [ "$state" = running ]; then
+            printf '%s\n' "$service"
+            return 0
+        fi
+        [ -n "$state" ] && candidate=$service
+    done
+    [ -n "$candidate" ] && printf '%s\n' "$candidate"
+}
+
+wait_composer() {
+    for i in $(seq 1 30); do
+        [ "$(getprop "init.svc.$1" 2>/dev/null)" = "$2" ] && return 0
+        sleep 0.5
+    done
+    echo "shell-prepare: $1 не перешёл в $2 за 15 с" >&2
+    return 1
+}
+
+# Пункты 7 и 8 шапки на pipa. Ветка pipa выходит раньше общей части, и до 23 ноября 2026 они на планшете не
+# применялись вовсе: все LUN флеш-памяти стояли на cfq, min_free_kbytes — 8620. Общий поиск диска здесь и не сработал
+# бы: /userdata на pipa — образ на loop0 (поверх dm и sda29), имя из /proc/mounts — «loop». noop — каждому LUN
+# UFS (sda…sdf — одна микросхема, свою очередь на 32 запроса она держит сама); флешки USB не трогаем
+pipa_disk_memory() {
+    for dev in /sys/block/sd*; do
+        case "$(readlink -f "$dev" 2>/dev/null)" in *ufshc*) ;; *) continue ;; esac
+        grep -qw noop "$dev/queue/scheduler" 2>/dev/null && echo noop > "$dev/queue/scheduler"
+        [ -w "$dev/queue/read_ahead_kb" ] && echo 128 > "$dev/queue/read_ahead_kb" 2>/dev/null || true
+    done
+    for dm in /sys/block/dm-*; do
+        [ -w "$dm/queue/read_ahead_kb" ] && echo 128 > "$dm/queue/read_ahead_kb" 2>/dev/null || true
+    done
+    [ -w /sys/block/sda/queue/wbt_lat_usec ] && echo 75000 > /sys/block/sda/queue/wbt_lat_usec 2>/dev/null || true
+    echo 200 > /proc/sys/vm/watermark_scale_factor
+    echo 32768 > /proc/sys/vm/min_free_kbytes
+    [ -w /proc/sys/vm/kswapd_threads ] && echo 1 > /proc/sys/vm/kswapd_threads 2>/dev/null || true
+    # Сжатая оперативка ZRAM (3 ГБ, zstd): при 5.5 GiB ОЗУ без swap браузер + Telegram + DeepSeek + Waydroid
+    # упираются в память. /dev/zram0 и zstd уже собраны в ядре pipa.
+    if [ -b /dev/zram0 ] && [ -w /sys/block/zram0/disksize ] && ! grep -q '^/dev/zram0 ' /proc/swaps 2>/dev/null; then
+        swapoff /dev/zram0 2>/dev/null || true
+        echo 1 > /sys/block/zram0/reset 2>/dev/null || true
+        grep -qw zstd /sys/block/zram0/comp_algorithm 2>/dev/null && echo zstd > /sys/block/zram0/comp_algorithm 2>/dev/null || true
+        echo 3221225472 > /sys/block/zram0/disksize 2>/dev/null || true
+        mkswap /dev/zram0 >/dev/null 2>&1 && swapon -p 100 /dev/zram0 2>/dev/null || true
+    fi
+    [ -w /proc/sys/vm/page-cluster ] && echo 0 > /proc/sys/vm/page-cluster 2>/dev/null || true
+    [ -w /proc/sys/vm/swappiness ] && echo 100 > /proc/sys/vm/swappiness 2>/dev/null || true
+}
+
+# Пост-загрузочная настройка SM8250 (kona) на pipa: в Halium свойство vendor.post_boot.parsed=1 не срабатывает,
+# из-за чего все 8 ядер и 14 шин L3/LLCC/DDR/NPU оставались в performance на макс. частоте, sched_boost=1,
+# а LPM C-states выключены (sleep_disabled=Y). Переводим в официальный рабочий профиль kona + input_boost.
+pipa_post_boot() {
+    w() { [ -w "$1" ] && printf '%s' "$2" > "$1" 2>/dev/null || true; }
+
+    # Включить энергосберегающие C-states ядер и выключить загрузочный sched_boost
+    w /sys/module/lpm_levels/parameters/sleep_disabled N
+    w /proc/sys/kernel/sched_boost 0
+
+    # Кластеры SM8250 (policy0: 4x Silver, policy4: 3x Gold, policy7: 1x Prime) -> schedutil
+    for p in policy0 policy4 policy7; do
+        dir="/sys/devices/system/cpu/cpufreq/$p"
+        [ -d "$dir" ] || continue
+        w "$dir/scaling_governor" schedutil
+        w "$dir/schedutil/up_rate_limit_us" 0
+        w "$dir/schedutil/down_rate_limit_us" 0
+        w "$dir/schedutil/pl" 1
+    done
+    w /sys/devices/system/cpu/cpufreq/policy0/scaling_min_freq 691200
+    w /sys/devices/system/cpu/cpufreq/policy0/schedutil/hispeed_freq 1248000
+    w /sys/devices/system/cpu/cpufreq/policy4/schedutil/hispeed_freq 1574400
+    w /sys/devices/system/cpu/cpufreq/policy7/schedutil/hispeed_freq 1632000
+
+    # Мгновенный отклик на касание и кнопку питания (из init.pipa.rc)
+    w /sys/devices/system/cpu/cpu_boost/input_boost_freq "0:1344000"
+    w /sys/devices/system/cpu/cpu_boost/input_boost_ms 120
+    w /sys/devices/system/cpu/cpu_boost/powerkey_input_boost_freq "0:1804800 1:0 2:0 3:0 4:2419200 5:0 6:0 7:3187200"
+    w /sys/devices/system/cpu/cpu_boost/powerkey_input_boost_ms 400
+
+    # Bus DCVS: LLCC, DDR (LPDDR5), NPU (из init.qcom.post_boot.sh)
+    soc=/sys/devices/platform/soc
+    if [ -d "$soc" ]; then
+        for cpubw in $soc/*cpu-cpu-llcc-bw/devfreq/*cpu-cpu-llcc-bw; do
+            [ -d "$cpubw" ] || continue
+            w "$cpubw/governor" bw_hwmon
+            w "$cpubw/bw_hwmon/mbps_zones" "4577 7110 9155 12298 14236 15258"
+            w "$cpubw/bw_hwmon/sample_ms" 4
+            w "$cpubw/bw_hwmon/io_percent" 50
+            w "$cpubw/bw_hwmon/hist_memory" 20
+            w "$cpubw/bw_hwmon/hyst_length" 10
+            w "$cpubw/bw_hwmon/down_thres" 30
+            w "$cpubw/bw_hwmon/guard_band_mbps" 0
+            w "$cpubw/bw_hwmon/up_scale" 250
+            w "$cpubw/bw_hwmon/idle_mbps" 1600
+            w "$cpubw/polling_interval" 40
+        done
+        for llccbw in $soc/*cpu-llcc-ddr-bw/devfreq/*cpu-llcc-ddr-bw; do
+            [ -d "$llccbw" ] || continue
+            w "$llccbw/governor" bw_hwmon
+            w "$llccbw/bw_hwmon/mbps_zones" "1720 2086 2929 3879 5931 6881 7980 10437"
+            w "$llccbw/bw_hwmon/sample_ms" 4
+            w "$llccbw/bw_hwmon/io_percent" 80
+            w "$llccbw/bw_hwmon/hist_memory" 20
+            w "$llccbw/bw_hwmon/hyst_length" 10
+            w "$llccbw/bw_hwmon/down_thres" 30
+            w "$llccbw/bw_hwmon/guard_band_mbps" 0
+            w "$llccbw/bw_hwmon/up_scale" 250
+            w "$llccbw/bw_hwmon/idle_mbps" 1600
+            w "$llccbw/polling_interval" 40
+        done
+        for npubw in $soc/*npu*-ddr-bw/devfreq/*npu*-ddr-bw; do
+            [ -d "$npubw" ] || continue
+            w /sys/devices/virtual/npu/msm_npu/pwr 1
+            w "$npubw/governor" bw_hwmon
+            w "$npubw/bw_hwmon/mbps_zones" "1720 2086 2929 3879 5931 6881 7980 10437"
+            w "$npubw/bw_hwmon/sample_ms" 4
+            w "$npubw/bw_hwmon/io_percent" 160
+            w "$npubw/bw_hwmon/hist_memory" 20
+            w "$npubw/bw_hwmon/hyst_length" 10
+            w "$npubw/bw_hwmon/down_thres" 30
+            w "$npubw/bw_hwmon/guard_band_mbps" 0
+            w "$npubw/bw_hwmon/up_scale" 250
+            w "$npubw/bw_hwmon/idle_mbps" 1600
+            w "$npubw/polling_interval" 40
+            w /sys/devices/virtual/npu/msm_npu/pwr 0
+        done
+        for npullcc in $soc/*npu*-llcc-bw/devfreq/*npu*-llcc-bw; do
+            [ -d "$npullcc" ] || continue
+            w /sys/devices/virtual/npu/msm_npu/pwr 1
+            w "$npullcc/governor" bw_hwmon
+            w "$npullcc/bw_hwmon/mbps_zones" "4577 7110 9155 12298 14236 15258"
+            w "$npullcc/bw_hwmon/sample_ms" 4
+            w "$npullcc/bw_hwmon/io_percent" 160
+            w "$npullcc/bw_hwmon/hist_memory" 20
+            w "$npullcc/bw_hwmon/hyst_length" 10
+            w "$npullcc/bw_hwmon/down_thres" 30
+            w "$npullcc/bw_hwmon/guard_band_mbps" 0
+            w "$npullcc/bw_hwmon/up_scale" 250
+            w "$npullcc/bw_hwmon/idle_mbps" 1600
+            w "$npullcc/polling_interval" 40
+            w /sys/devices/virtual/npu/msm_npu/pwr 0
+        done
+
+        # MemLat / L3 / CDSP scaling (из init.qti.dcvs.sh)
+        for memlat in $soc/*qcom,devfreq-l3/*cpu*-lat/devfreq/*cpu*-lat $soc/*cpu*-lat/devfreq/*cpu*-lat; do
+            [ -d "$memlat" ] || continue
+            w "$memlat/governor" mem_latency
+            w "$memlat/polling_interval" 8
+            w "$memlat/mem_latency/ratio_ceil" 400
+        done
+        for latfloor in $soc/*cpu-ddr-latfloor*/devfreq/*cpu-ddr-latfloor*; do
+            [ -d "$latfloor" ] || continue
+            w "$latfloor/governor" compute
+            w "$latfloor/polling_interval" 8
+        done
+        for qoslat in $soc/*qoslat/devfreq/*qoslat; do
+            [ -d "$qoslat" ] || continue
+            w "$qoslat/governor" mem_latency
+            w "$qoslat/polling_interval" 10
+            w "$qoslat/mem_latency/ratio_ceil" 50
+        done
+        for l3cdsp in $soc/*qcom,devfreq-l3/*cdsp-l3-lat/devfreq/*cdsp-l3-lat; do
+            [ -d "$l3cdsp" ] || continue
+            w "$l3cdsp/governor" cdspl3
+        done
+        for l3gold in $soc/*qcom,devfreq-l3/*cpu4-cpu-l3-lat/devfreq/*cpu4-cpu-l3-lat; do
+            [ -d "$l3gold" ] || continue
+            w "$l3gold/mem_latency/ratio_ceil" 4000
+        done
+        for l3prime in $soc/*qcom,devfreq-l3/*cpu7-cpu-l3-lat/devfreq/*cpu7-cpu-l3-lat; do
+            [ -d "$l3prime" ] || continue
+            w "$l3prime/mem_latency/ratio_ceil" 20000
+        done
+    fi
+
+    # Развести IRQ GPU (KGSL -> CPU1) и дисплея (MDSS/DRM -> CPU2) (из init.aospa.perf.sh)
+    for pair in kgsl_3d0_irq:1 kgsl-3d0:1 msm_drm:2 MDSS:2; do
+        name=${pair%:*}
+        cpu=${pair#*:}
+        for p in /proc/irq/*/"$name"; do
+            [ -e "$p" ] || continue
+            w "$(dirname "$p")/smp_affinity_list" "$cpu"
+        done
+    done
+}
+
+case "$(cat /usr/local/lib/naomi/device.env 2>/dev/null)" in
+    NAOMI_DEVICE=pipa)
+        if [ "${1:-}" = --restart-pipa-composer ]; then
+            if systemctl is-active --quiet lightdm.service naomi-shell.service || pgrep -f '[l]omiri-system-compositor' >/dev/null; then
+                echo 'shell-prepare: сначала остановите Lomiri и naomi-shell' >&2
+                exit 1
+            fi
+            SERVICE=$(pipa_composer) || { echo 'shell-prepare: служба QTI composer не найдена' >&2; exit 1; }
+            # Отдельно проверяем stopped и running, чтобы не принять прежний running за успешный перезапуск.
+            setprop ctl.stop "$SERVICE" || exit 1
+            if ! wait_composer "$SERVICE" stopped; then
+                setprop ctl.start "$SERVICE"
+                exit 1
+            fi
+            setprop ctl.start "$SERVICE" && wait_composer "$SERVICE" running
+            exit $?
+        fi
+        if SERVICE=$(pipa_composer); then
+            wait_composer "$SERVICE" running || exit 1
+        fi
+        if BL_DIR=$(NAOMI_DEVICE=pipa /usr/local/lib/naomi/naomid --backlight) && [ -n "$BL_DIR" ]; then
+            BL=${BL_DIR}brightness
+            if [ -e "$BL" ] && ! runuser -u phablet -- test -w "$BL"; then
+                chgrp video "$BL" && chmod g+w "$BL"
+            fi
+            if [ "$BL_DIR" = /sys/class/backlight/4-0011/ ] &&
+                read -r current < "$BL" && [ "$current" = 0 ] &&
+                read -r max < "${BL_DIR}max_brightness" && [ "$max" -gt 1 ]; then
+                echo "$((max / 2))" > "$BL"
+            fi
+        fi
+        pipa_disk_memory
+        pipa_post_boot
+        exit 0
+        ;;
+    NAOMI_DEVICE=redfin) ;;
+    *) echo 'shell-prepare: не определён профиль устройства' >&2; exit 1 ;;
+esac
+
+[ "${1:-}" != --restart-pipa-composer ] || exit 2
+
 for i in $(seq 1 60); do
     [ "$(getprop init.svc.vendor.qti.hardware.display.composer 2>/dev/null)" = running ] && break
     sleep 0.5

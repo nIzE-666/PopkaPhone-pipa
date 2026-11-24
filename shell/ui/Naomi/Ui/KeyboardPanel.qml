@@ -22,6 +22,7 @@ Item {
     y: parent.height - visibleHeight
 
     property real accessoryHeight: 0
+    property bool tablet: false
     readonly property real keyEdge: kb.edge
     readonly property real keyRadius: kb.keyRadius
     property real shown: 0
@@ -46,7 +47,7 @@ Item {
     // уход пальцем сам прячет модуль ввода — пружину, что уже ведёт клавиатуру туда же, не перебивать
     onOpenChanged: if (!dragging && !(settle.running && settle.target === (open ? 1 : 0)))
                        animateTo(open ? 1 : 0)
-    Component.onCompleted: shown = open ? 1 : 0
+    Component.onCompleted: if (open) { if (tablet) animateTo(1); else shown = 1 }
 
     function dragTo(px) {
         dragging = true
@@ -132,6 +133,7 @@ Item {
 
     Keyboard {
         id: kb
+        tablet: panel.tablet
         y: panel.accessoryHeight
         width: parent.width
         height: implicitHeight

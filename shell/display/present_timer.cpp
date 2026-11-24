@@ -1,6 +1,7 @@
 #include "present_timer.h"
 
 #include <algorithm>
+#include <cerrno>
 #include <cstdio>
 #include <string>
 #include <cstdlib>
@@ -84,6 +85,11 @@ void PresentTimer::add(int fenceFd)
 {
     {
         std::lock_guard<std::mutex> lock(m_mutex);
+        // Учёт кадров не должен накапливать fd, если HAL перестал сигналить.
+        if (m_queue.size() >= 16) {
+            close(m_queue.front());
+            m_queue.pop_front();
+        }
         m_queue.push_back(fenceFd);
     }
     m_cv.notify_one();
@@ -102,13 +108,23 @@ void PresentTimer::run()
             m_queue.pop_front();
         }
         pollfd p{fd, POLLIN, 0};
-        poll(&p, 1, 1000);
-        int64_t ts = fenceSignalTime(fd);
+        int ready;
+        do
+            ready = poll(&p, 1, 1000);
+        while (ready < 0 && errno == EINTR);
+        const bool signaled = ready > 0 && (p.revents & POLLIN) && !(p.revents & POLLERR);
+        const int64_t stamp = signaled ? fenceSignalTime(fd) : 0;
         close(fd);
-        if (!ts)
-            ts = monotonicNs();
+        if (!signaled) {
+            if (m_log && ready == 0)
+                fprintf(stderr, "naomi-frames: present fence не сработал за 1 с\n");
+            continue;
+        }
+        const int64_t ts = stamp > 0 ? stamp : monotonicNs();
 
         std::lock_guard<std::mutex> lock(m_mutex);
+        if (ts <= m_last)
+            continue;
         // Пропуск — пауза от 1,5 до 6 периодов: кадр не успел к vsync посреди анимации. Длиннее — это
         // покой: оболочка не рисует, когда ничего не меняется (так и задумано, ради батареи).
         const int64_t gap = ts - m_last;
@@ -118,8 +134,7 @@ void PresentTimer::run()
         const bool drop = m_last && gap > m_periodNs * 3 / 2 && !idle;
         if (drop)
             ++m_drops;
-        if (ts > m_last)
-            m_last = ts;
+        m_last = ts;
         ++m_frames;
         m_stamps.push_back(ts);
         if (m_logDrops) {
@@ -185,6 +200,10 @@ void PresentTimer::logSecond(int64_t now)  // под m_mutex
 {
     NaomiFrameSnapshot s{};
     windowStats(m_stamps, now - 1000000000, s);
+    // Покой (часы на столе — 1 к/с, мигающий курсор терминала — 2 к/с) без новых пропусков — строку не пишем
+    if (s.fps <= 2 && m_drops == m_loggedDrops)
+        return;
+    m_loggedDrops = m_drops;
     fprintf(stderr, "naomi-frames: %.0f к/с, медиана %.2f мс, p95 %.2f мс, максимум %.2f мс, "
                     "всего %llu, пропусков %llu\n",
             s.fps, s.medianMs, s.p95Ms, s.maxMs, (unsigned long long)m_frames,

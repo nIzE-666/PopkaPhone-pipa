@@ -1,9 +1,11 @@
 # naomi-shell — оболочка НаомиФона. QML лежит рядом с программой (qml/), правится без сборки C++.
 add_executable(naomi-shell main.cpp
-    display_stats.cpp display_stats.h
+    display_stats.cpp display_stats.h scene_rotation.h
     power.cpp power.h
+    haptics.cpp haptics.h
     project_file.cpp project_file.h
     system_stats.cpp system_stats.h
+    system_tools.cpp system_tools.h
     phone_client.cpp phone_client.h
     dbus_plain.cpp dbus_plain.h
     dev_trace.cpp dev_trace.h
@@ -34,7 +36,7 @@ add_executable(naomi-shell main.cpp
 target_include_directories(naomi-shell PRIVATE ${CMAKE_SOURCE_DIR}/display)
 # ввод текста (модуль «naomi», исправление опечаток) — общая библиотека shell/input, как у программ;
 # трансляция экрана — shell/stream, «Файлы» рабочего стола — shell/files; связь с браузером — сокет (Network)
-target_link_libraries(naomi-shell PRIVATE naomi-input naomi-stream-service naomi-files naomi-preview Qt6::Gui Qt6::GuiPrivate Qt6::Qml Qt6::Quick Qt6::QuickPrivate Qt6::DBus
+target_link_libraries(naomi-shell PRIVATE naomi-device naomi-input naomi-stream-service naomi-files naomi-preview Qt6::Gui Qt6::GuiPrivate Qt6::Qml Qt6::Quick Qt6::QuickPrivate Qt6::DBus
                       Qt6::Network Qt6::WaylandCompositor Qt6::WaylandCompositorPrivate)
 
 # QML копируется при каждой сборке (не только когда пересобирается C++); удалённые файлы тоже уходят. Шейдер видео

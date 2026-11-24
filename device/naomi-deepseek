@@ -1,0 +1,53 @@
+#!/bin/sh
+# Launch DeepSeek Harness Web UI in naomi-web single-app mode.
+set -eu
+
+UID_NUM=$(id -u)
+export XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-/run/user/${UID_NUM}}"
+export DBUS_SESSION_BUS_ADDRESS="${DBUS_SESSION_BUS_ADDRESS:-unix:path=${XDG_RUNTIME_DIR}/bus}"
+
+SERVICE="${NAOMI_DSH_SERVICE:-dsh-web.service}"
+WEB_BIN="${NAOMI_WEB_BIN:-$HOME/naomi/build/apps/web/naomi-web}"
+POLL_INTERVAL="${NAOMI_DSH_POLL_INTERVAL:-0.25}"
+POLL_MAX="${NAOMI_DSH_POLL_MAX:-60}"
+
+systemctl --user start "$SERVICE"
+
+extract_url() {
+    inv=$(systemctl --user show -p InvocationID --value "$SERVICE" 2>/dev/null || true)
+    if [ -n "$inv" ]; then
+        journalctl --user "_SYSTEMD_INVOCATION_ID=$inv" --no-pager -o cat 2>/dev/null || true
+    else
+        since=$(systemctl --user show -p ExecMainStartTimestamp --value "$SERVICE" 2>/dev/null || true)
+        if [ -n "$since" ]; then
+            journalctl --user -u "$SERVICE" --since "$since" --no-pager -o cat 2>/dev/null || true
+        else
+            journalctl --user -u "$SERVICE" -b --no-pager -o cat 2>/dev/null || true
+        fi
+    fi | sed -n 's/.*\(http:\/\/127\.0\.0\.1:[0-9][0-9]*\/?token=[^[:space:]]*\).*/\1/p' | tail -n 1
+}
+
+url=""
+i=0
+while [ "$i" -lt "$POLL_MAX" ]; do
+    url=$(extract_url)
+    if [ -n "$url" ]; then
+        break
+    fi
+    i=$((i + 1))
+    if [ "$i" -lt "$POLL_MAX" ]; then
+        sleep "$POLL_INTERVAL"
+    fi
+done
+
+if [ -z "$url" ]; then
+    echo "DeepSeek Harness did not publish a local session URL in time" >&2
+    exit 1
+fi
+
+if [ ! -x "$WEB_BIN" ]; then
+    echo "naomi-web binary not found" >&2
+    exit 127
+fi
+
+exec "$WEB_BIN" --app "$url" --name DeepSeek "$@"

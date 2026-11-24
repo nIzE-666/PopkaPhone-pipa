@@ -19,6 +19,7 @@
 #include <QColor>
 #include <QElapsedTimer>
 #include <QObject>
+#include <QStringList>
 #include <QPointer>
 #include <QQuickPaintedItem>
 #include <QTimer>
@@ -65,6 +66,7 @@ private:
     quint64 m_cpuBusy = 0, m_cpuAll = 0, m_primeBusy = 0, m_primeAll = 0;
     quint64 m_pages = 0, m_androidUs = 0;
     QString m_skinPath, m_chipPath;
+    QStringList m_cpuZones;
 };
 
 // График одной величины за минуту: линия с заливкой, точка — сейчас; limit — черта порога (пунктир), marks — секунды

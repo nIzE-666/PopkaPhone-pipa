@@ -11,11 +11,16 @@
 #include <QString>
 #include <QStringList>
 
+class QThread;
+
 class WebFilter : public QWebEngineUrlRequestInterceptor
 {
     Q_OBJECT
 public:
+    // список читается в своём потоке (≈ 90 тыс. доменов — 70–116 мс): запуск браузера его не ждёт; пока не прочитан,
+    // не блокируется ничего — в эти доли секунды движок ещё только поднимается
     explicit WebFilter(const QString &path, QObject *parent = nullptr);
+    ~WebFilter() override;
     void interceptRequest(QWebEngineUrlRequestInfo &info) override;
     // профиль страниц (WebEngineProfile из QML): с этой минуты его запросы идут через фильтр
     Q_INVOKABLE void attach(QObject *profile);
@@ -26,9 +31,16 @@ private:
         bool thirdParty = false;    // только сторонние (не того же сайта, что страница)
         QStringList on;             // исключение — только на этих сайтах (пусто — везде)
     };
-    bool load(const QString &path);
-    const Rule *find(const QHash<QString, Rule> &rules, const QString &host) const;   // домен или его родитель
+    struct Lists {
+        QHash<QString, Rule> block, allow;
+        QSet<QString> sites;
+    };
+    static bool load(const QString &path, Lists &out);
+    // домен или его родитель
+    static const Rule *find(const QHash<QString, Rule> &rules, const QString &host);
+    static bool hasDomain(const QSet<QString> &domains, const QString &host);
 
+    QThread *m_loader = nullptr;
     QHash<QString, Rule> m_block, m_allow;
     QSet<QString> m_sites;          // на этих сайтах не блокировать ничего
     quint64 m_blocked = 0, m_logged = 0;

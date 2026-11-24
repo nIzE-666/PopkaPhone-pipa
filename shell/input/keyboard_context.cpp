@@ -1,4 +1,5 @@
 #include "keyboard_context.h"
+#include "keyboard_logic.h"
 
 #include <QCoreApplication>
 #include <QDBusConnection>
@@ -55,33 +56,105 @@ KeyboardContext::~KeyboardContext()
 
 void KeyboardContext::showInputPanel()
 {
-    // поле само просит клавиатуру (касание по нему); без поля ввода в фокусе — не показываем
-    if (query(Qt::ImEnabled).toBool())
+    // поле само просит клавиатуру (касание по нему); в режиме manualOnly (планшет) — только кнопка на панели
+    if (naomi::keyboard::shouldShowOnAutoRequest(m_manualOnly, query(Qt::ImEnabled).toBool()))
         setVisible(true);
 }
 
 void KeyboardContext::hideInputPanel()
 {
+    m_manual = false;
     setVisible(false);
 }
 
+void KeyboardContext::showManual()
+{
+    m_manual = true;
+    setVisible(true);
+}
+
+void KeyboardContext::toggle()
+{
+    if (m_visible)
+        hideInputPanel();
+    else
+        showManual();
+}
+
+void KeyboardContext::setLayout(const QString &layout)
+{
+    const QByteArray latin = layout.toLatin1();
+    const std::string_view normalized = naomi::keyboard::normalizeLayout(std::string_view(latin.constData(), size_t(latin.size())));
+    if (normalized.empty())
+        return;
+    const QString next = QString::fromLatin1(normalized.data(), qsizetype(normalized.size()));
+    if (next == m_layout)
+        return;
+    m_layout = next;
+    emit layoutChanged();
+}
+
+void KeyboardContext::toggleLayout()
+{
+    const QByteArray latin = m_layout.toLatin1();
+    const std::string_view next = naomi::keyboard::toggledLayout(std::string_view(latin.constData(), size_t(latin.size())));
+    setLayout(QString::fromLatin1(next.data(), qsizetype(next.size())));
+}
+
+bool KeyboardContext::inputEnabled() const
+{
+    return usesDirectInput(QGuiApplication::focusObject());
+}
+
 // Фокус ушёл к другому элементу без ввода — клавиатура прячется. Фокуса нет вовсе (окно программы потеряло
-// фокус Wayland: её увели домой) — остаётся как была: она часть окна и уезжает вместе с ним
+// фокус Wayland: её увели домой) — остаётся как была: она часть окна и уезжает вместе с ним.
+// Открытая вручную кнопкой панели (m_manual) остаётся на экране, пока её не скроют.
 void KeyboardContext::setFocusObject(QObject *object)
 {
-    if (object && m_visible && !query(Qt::ImEnabled).toBool())
+    if (naomi::keyboard::shouldDismissOnFocusChange(m_visible, m_manual, object != nullptr,
+                                                    object ? query(Qt::ImEnabled).toBool() : false,
+                                                    m_dismissOnFocusLoss))
         setVisible(false);
+    emit focusObjectChanged();
 }
 
 void KeyboardContext::update(Qt::InputMethodQueries queries)
 {
-    if (m_visible && (queries & Qt::ImEnabled) && QGuiApplication::focusObject() && !query(Qt::ImEnabled).toBool())
+    if ((queries & Qt::ImEnabled)
+        && naomi::keyboard::shouldDismissOnImUpdate(m_visible, m_manual, QGuiApplication::focusObject() != nullptr,
+                                                    query(Qt::ImEnabled).toBool()))
         setVisible(false);
+    if (queries & Qt::ImEnabled)
+        emit focusObjectChanged();
+}
+
+bool KeyboardContext::usesDirectInput(QObject *focus) const
+{
+    return naomi::keyboard::shouldUseDirectInput(focus != nullptr, focus ? query(Qt::ImEnabled).toBool() : false,
+                                                 bool(m_keyFallback), focus && focus->inherits("QWaylandQuickItem"));
 }
 
 void KeyboardContext::commit(const QString &text)
 {
+    if (text.isEmpty())
+        return;
     QObject *focus = QGuiApplication::focusObject();
+    if (usesDirectInput(focus)) {
+        QInputMethodEvent e;
+        e.setCommitString(text);
+        QCoreApplication::sendEvent(focus, &e);
+        return;
+    }
+    if (m_keyFallback) {
+        for (qsizetype i = 0; i < text.size();) {
+            const qsizetype len = text[i].isHighSurrogate() && i + 1 < text.size() ? 2 : 1;
+            const QString ch = text.mid(i, len);
+            m_keyFallback(true, 0, Qt::NoModifier, ch);
+            m_keyFallback(false, 0, Qt::NoModifier, ch);
+            i += len;
+        }
+        return;
+    }
     if (!focus)
         return;
     QInputMethodEvent e;
@@ -93,6 +166,17 @@ void KeyboardContext::commit(const QString &text)
 void KeyboardContext::replaceBefore(int count, const QString &text)
 {
     QObject *focus = QGuiApplication::focusObject();
+    // Окну программы без text-input (запасной путь клавишами — как в commit и key) событие ввода с заменой не дойдёт:
+    // исправление терялось или дописывалось рядом со словом. Слово стираем Backspace и печатаем заново.
+    // count — в единицах UTF-16, а Backspace стирает символ: исправляют слова из букв, суррогатных пар в них нет
+    if (m_keyFallback && !usesDirectInput(focus)) {
+        for (int i = 0; i < count; ++i) {
+            m_keyFallback(true, Qt::Key_Backspace, Qt::NoModifier, QString());
+            m_keyFallback(false, Qt::Key_Backspace, Qt::NoModifier, QString());
+        }
+        commit(text);
+        return;
+    }
     if (!focus)
         return;
     QInputMethodEvent e;
@@ -103,14 +187,28 @@ void KeyboardContext::replaceBefore(int count, const QString &text)
 void KeyboardContext::key(int qtKey)
 {
     QObject *focus = QGuiApplication::focusObject();
-    if (!focus)
+    const auto sendDirect = [focus, qtKey] {
+        const QString text = qtKey == Qt::Key_Return ? QStringLiteral("\r")
+                           : qtKey == Qt::Key_Backspace ? QStringLiteral("\b")
+                           : qtKey == Qt::Key_Tab ? QStringLiteral("\t") : QString();
+        QKeyEvent press(QEvent::KeyPress, qtKey, Qt::NoModifier, text);
+        QCoreApplication::sendEvent(focus, &press);
+        QKeyEvent release(QEvent::KeyRelease, qtKey, Qt::NoModifier, text);
+        QCoreApplication::sendEvent(focus, &release);
+    };
+    if (usesDirectInput(focus)) {
+        sendDirect();
         return;
-    const QString text = qtKey == Qt::Key_Return ? QStringLiteral("\r")
-                       : qtKey == Qt::Key_Backspace ? QStringLiteral("\b") : QString();
-    QKeyEvent press(QEvent::KeyPress, qtKey, Qt::NoModifier, text);
-    QCoreApplication::sendEvent(focus, &press);
-    QKeyEvent release(QEvent::KeyRelease, qtKey, Qt::NoModifier, text);
-    QCoreApplication::sendEvent(focus, &release);
+    }
+    if (m_keyFallback) {
+        const QString text = qtKey == Qt::Key_Return ? QStringLiteral("\r")
+                           : qtKey == Qt::Key_Tab ? QStringLiteral("\t") : QString();
+        m_keyFallback(true, qtKey, Qt::NoModifier, text);
+        m_keyFallback(false, qtKey, Qt::NoModifier, text);
+        return;
+    }
+    if (focus)
+        sendDirect();
 }
 
 void KeyboardContext::setRealKeys(bool on)
@@ -145,6 +243,8 @@ QString KeyboardContext::textBeforeCursor() const
 
 int KeyboardContext::hints() const
 {
+    if (!usesDirectInput(QGuiApplication::focusObject()))
+        return int(Qt::ImhNoAutoUppercase | Qt::ImhNoPredictiveText);
     return query(Qt::ImHints).toInt();
 }
 
@@ -217,6 +317,8 @@ QVariant KeyboardContext::query(Qt::InputMethodQuery q) const
 
 void KeyboardContext::setVisible(bool visible)
 {
+    if (!visible)
+        m_manual = false;
     if (visible == m_visible)
         return;
     m_visible = visible;

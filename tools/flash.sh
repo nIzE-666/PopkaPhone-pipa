@@ -67,14 +67,19 @@ check_redfin() {
 to_bootloader() {
   one_device
   if [ -n "$(fastboot_serial)" ]; then
+    [ "$(getvar product)" = redfin ] || die "загрузчик не принадлежит redfin"
     if [ "$(getvar is-userspace)" = yes ]; then fastboot reboot-bootloader; wait_fastboot no; fi
     return 0
   fi
-  [ -n "$(adb_serial)" ] || die "телефон не виден ни в ADB, ни в fastboot. Выключи его и зажми питание + громкость вниз"
+  local serial product
+  serial=$(adb_serial)
+  [ -n "$serial" ] || die "телефон не виден ни в ADB, ни в fastboot. Выключи его и зажми питание + громкость вниз"
+  product=$(adb -s "$serial" shell getprop ro.product.device 2>/dev/null | tr -d '\r' || true)
+  [ "$product" = redfin ] || die "ADB не подтвердил redfin"
   say "ADB → перезагрузка в загрузчик"
   # Ubuntu Touch: adb reboot без root не срабатывает («Permission denied») — тогда через sudo; с паролем на sudo
   # (до device/dev-access.sh) — кнопками или самому: adb shell -t sudo reboot bootloader
-  adb reboot bootloader 2>&1 | grep -qi 'denied' && adb shell sudo -n reboot bootloader 2>/dev/null || true
+  adb -s "$serial" reboot bootloader 2>&1 | grep -qi 'denied' && adb -s "$serial" shell sudo -n reboot bootloader 2>/dev/null || true
   wait_fastboot no
 }
 

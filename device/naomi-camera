@@ -1,0 +1,28 @@
+#!/bin/sh
+# PopkaPhone native Camera launcher (GUI over SHM Wayland + headless CLI --snap / --torch).
+set -eu
+
+BIN="${NAOMI_CAMERA_BIN:-/home/phablet/naomi/build/apps/camera/naomi-camera}"
+if [ ! -x "$BIN" ]; then
+    echo "naomi-camera binary not found at $BIN" >&2
+    exit 127
+fi
+
+# Offscreen Android EGL Pbuffer for libcamera.so.1 uses libhybris null ws, never Wayland EGL.
+export HYBRIS_EGLPLATFORM=null
+export EGL_PLATFORM=null
+
+for arg in "$@"; do
+    case "$arg" in
+        --snap|--torch|--torch-seconds|--help|-h)
+            exec "$BIN" "$@"
+            ;;
+    esac
+done
+
+export WAYLAND_DISPLAY="${WAYLAND_DISPLAY:-wayland-naomi}"
+export QT_QPA_PLATFORM=wayland
+export QT_WAYLAND_CLIENT_BUFFER_INTEGRATION=none
+export QT_WAYLAND_DISABLE_WINDOWDECORATION=1
+
+exec "$BIN" "$@"

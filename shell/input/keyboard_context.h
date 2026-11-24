@@ -17,8 +17,12 @@
 #include <QPointer>
 #include <QPointF>
 #include <QRectF>
+#include <QString>
 #include <qpa/qplatforminputcontext.h>
 #include <qpa/qplatforminputcontextplugin_p.h>
+
+#include <functional>
+#include <utility>
 
 class KeyboardContext : public QPlatformInputContext
 {
@@ -26,7 +30,11 @@ class KeyboardContext : public QPlatformInputContext
     Q_PROPERTY(bool visible READ isInputPanelVisible NOTIFY visibleChanged)
     Q_PROPERTY(bool tracking READ tracking NOTIFY trackingChanged)
     Q_PROPERTY(QPointF trackPoint READ trackPoint NOTIFY trackPointChanged)
+    Q_PROPERTY(QString layout READ layout WRITE setLayout NOTIFY layoutChanged)
+    Q_PROPERTY(bool inputEnabled READ inputEnabled NOTIFY focusObjectChanged)
 public:
+    using KeyFallback = std::function<void(bool down, int qtKey, int modifiers, const QString &text)>;
+
     static KeyboardContext *instance();   // после создания QGuiApplication; null — модуль не загружен
 
     KeyboardContext();
@@ -35,10 +43,22 @@ public:
     bool isValid() const override { return true; }
     void showInputPanel() override;
     void hideInputPanel() override;
+    void setManualOnly(bool enabled) { m_manualOnly = enabled; }
+    bool isManualOnly() const { return m_manualOnly; }
+    void setDismissOnFocusLoss(bool enabled) { m_dismissOnFocusLoss = enabled; }
+    void setKeyFallback(KeyFallback fallback) { m_keyFallback = std::move(fallback); }
     bool isInputPanelVisible() const override { return m_visible; }
+    bool isManual() const { return m_manual; }
     QRectF keyboardRect() const override { return m_rect; }
     void setFocusObject(QObject *object) override;
     void update(Qt::InputMethodQueries queries) override;
+
+    QString layout() const { return m_layout; }
+    Q_INVOKABLE void setLayout(const QString &layout);
+    Q_INVOKABLE void toggleLayout();
+    bool inputEnabled() const;
+    Q_INVOKABLE void showManual();
+    Q_INVOKABLE void toggle();
 
     Q_INVOKABLE void commit(const QString &text);
     Q_INVOKABLE void replaceBefore(int count, const QString &text);   // заменить count знаков перед курсором
@@ -62,12 +82,20 @@ signals:
     void visibleChanged();
     void trackingChanged();
     void trackPointChanged();
+    void layoutChanged();
+    void focusObjectChanged();
 
 private:
     QVariant query(Qt::InputMethodQuery q) const;
+    bool usesDirectInput(QObject *focus) const;
     void setVisible(bool visible);
 
     bool m_visible = false;
+    bool m_manual = false;
+    bool m_manualOnly = false;
+    bool m_dismissOnFocusLoss = false;
+    QString m_layout = QStringLiteral("EN");
+    KeyFallback m_keyFallback;
     QRectF m_rect;
     bool m_tracking = false;
     QPointer<QObject> m_trackItem;

@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">В Ubuntu Touch</string>
+    <string name="title">Перезагрузить в Ubuntu Touch?</string>
+    <string name="confirm">Сохраните работу. Планшет закроет приложения One UI и загрузит Ubuntu Touch.</string>
+    <string name="reboot">Перезагрузить</string>
+    <string name="selecting">Проверяем загрузочный слот. Подтвердите запрос root-доступа, если он появится.</string>
+    <string name="restarting">Перезагружаемся в Ubuntu Touch…</string>
+    <string name="failed">Не удалось перезагрузиться в Ubuntu Touch.</string>
+</resources>

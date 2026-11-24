@@ -460,7 +460,8 @@ def cmd_install(args):
     if not ssh_ok():
         die("нужен SSH (tools/naomi access)")
     ssh_run(f"mkdir -p {PHONE}/bin")
-    for f in ("install-shell.sh", "shell-prepare", "safescreen.py", "hwcspike.py", "blackbox.py"):
+    for f in ("install-shell.sh", "shell-prepare", "naomi-telegram", "naomi-deepseek", "naomi-pipa-slot-switch",
+              "safescreen.py", "hwcspike.py", "blackbox.py"):
         push(os.path.join(ROOT, "device", f), f"{PHONE}/bin/{f}")
     action = "uninstall" if args[:1] == ["uninstall"] else "install"
     ssh_run(f"sudo -n sh {PHONE}/bin/install-shell.sh {action}")

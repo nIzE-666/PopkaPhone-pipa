@@ -22,6 +22,8 @@ Item {
         { id: "dock", name: "Только док", up: 55, lo: 45, s: "всегда на доке" },
         { id: "custom", name: "Своё", up: ch.upper, lo: ch.lower, s: "сами" },
         { id: "off", name: "Без предела", up: 100, lo: 97, s: "как было" }]
+        // Pad 6 (naomid: Backend night) держит заряд только от 80 % — «Только док» (55 %) ему не по силам
+        .filter(m => m.id !== "dock" || !(ch.minUpper > m.up))
     readonly property var mode: modes.find(m => m.id === ch.mode) || modes[0]
     implicitHeight: col.height
 
@@ -59,6 +61,8 @@ Item {
         case "draining": return ["спускается к " + ch.stop + " %", ch.warm
             ? "полчаса теплее 35 °C — верх снижен до 60 %; питание от кабеля отключено, пока батарея не спустится"
             : "питание от кабеля отключено, пока батарея не дойдёт до верха: так быстрее уходит с высокого напряжения"]
+        case "resting": return ["пауза до " + ch.start + " %", "заряд стоит, планшет живёт от батареи: удержать заряд на месте ядро Xiaomi не умеет — ниже "
+                                                              + ch.start + " % снова зарядится до " + ch.stop + " %"]
         case "hot": return ["пауза: жарко", "батарея " + comma(tempC, 1) + " °C — заряд продолжится, когда остынет до 37 °C"]
         case "full": return ["до 100 % один раз", "отключите кабель — и снова «" + m + "»; на 100 % — не дольше 3 ч"]
         case "calibrating": return ["калибровка", ch.stop <= 15 ? "спускается до 15 %, потом одним заходом до 100 % — чтобы проценты не врали"
@@ -296,7 +300,7 @@ Item {
                                     anchors.verticalCenter: parent.verticalCenter
                                     readonly property bool up: modelData[1] === "upper"
                                     value: up ? page.ch.upper : page.ch.lower
-                                    from: up ? 50 : 20
+                                    from: up ? Math.max(50, page.ch.minUpper || 0) : 20
                                     to: up ? 100 : page.ch.upper - 5
                                     step: 5
                                     unit: "%"
@@ -323,12 +327,15 @@ Item {
             Head { width: col.width; num: "02"; title: "ЗАЩИТА" }
             Repeater {
                 model: [
-                    ["heat", "Жара", "на кабеле теплее 35 °C полчаса — верх 60 %; теплее 40 °C — заряд на паузе, пока не остынет до 37 °C"],
+                    ["heat", "Жара", page.ch.backend === "night"
+                        ? "теплее 40 °C — заряд на паузе, пока не остынет до 37 °C; ядро Xiaomi ставит паузу только выше 80 %, ниже — заряд идёт, но ток ядро убавляет само"
+                        : "на кабеле теплее 35 °C полчаса — верх 60 %; теплее 40 °C — заряд на паузе, пока не остынет до 37 °C"],
                     ["defender", "Защита ядра Google", "запасная, когда предела нет («Без предела», «до 100 % один раз»): 6 ч на кабеле в тепле — спустить до 80 %. С завода стоит «вхолостую», даже в Android"],
                     ["calibrate", "Калибровка процентов", "раз в месяц, в прохладе: от 15 % одним заходом до 100 %, полчаса — и назад к режиму"
                         + (page.ch.nextCalibration > 0 ? " · следующая — " + page.day(page.ch.nextCalibration) : "")
                         + (page.ch.lastFull > 0 ? " · последний 100 %: " + page.day(page.ch.lastFull) : "")],
                     ["lowoff", "Выключить на 3 %", "без кабеля на 3 % — аккуратно выключить телефон: лежать в нуле батарее вредно"]]
+                    .filter(r => r[0] !== "defender" || page.ch.backend !== "night")   // TEMP-DEFEND — только у Google
                 delegate: Item {
                     id: prow
                     required property var modelData

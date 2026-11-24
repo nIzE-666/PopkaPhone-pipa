@@ -16,6 +16,7 @@ import QtQuick.Shapes
 Item {
     id: win
     property bool active: false
+    property bool pinned: false
     property bool maximized: false
     property bool minimized: false
     property bool tool: false
@@ -30,7 +31,7 @@ Item {
     signal activated()
     signal closed()          // окно ушло — его можно уничтожить
 
-    readonly property int barH: chromeless ? 0 : 40
+    readonly property int barH: chromeless ? 0 : DeskStyle.webBarH
     readonly property real corner: chromeless ? 0 : DeskStyle.corner(width, height)
     property rect normal                     // где было до «развернуть»
 
@@ -49,6 +50,17 @@ Item {
             x = normal.x; y = normal.y; width = normal.width; height = normal.height
         }
         maximized = !maximized
+    }
+    function snapHalf(right) {
+        if (!area)
+            return
+        maximized = false
+        const half = Math.floor(area.width / 2)
+        x = right ? area.width - half : 0
+        y = 0
+        width = half
+        height = area.height
+        normal = Qt.rect(x, y, width, height)
     }
 
     property bool closing: false
@@ -120,8 +132,11 @@ Item {
             id: buttons
             anchors.right: parent.right
             anchors.rightMargin: 6
-            y: 5
+            y: (win.barH - DeskStyle.windowButton) / 2
             spacing: 2
+            WinButton { visible: DeskStyle.tablet && !win.closeOnly; glyph: "pin"; active: win.pinned; onClicked: { win.pinned = !win.pinned; win.activate() } }
+            WinButton { visible: DeskStyle.tablet && !win.closeOnly; glyph: "split-left"; onClicked: win.snapHalf(false) }
+            WinButton { visible: DeskStyle.tablet && !win.closeOnly; glyph: "split-right"; onClicked: win.snapHalf(true) }
             WinButton { visible: !win.closeOnly; glyph: "minimize"; onClicked: win.minimized = true }
             WinButton { visible: !win.closeOnly; glyph: win.maximized ? "restore" : "maximize"; onClicked: win.toggleMaximize() }
             WinButton { glyph: "close"; danger: true; onClicked: win.close() }

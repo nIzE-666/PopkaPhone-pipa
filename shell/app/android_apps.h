@@ -140,7 +140,9 @@ private:
     bool m_frozen = false;
     void sleep(bool on);
     void sendSleep();
+    void updateIdleStop();
     QTimer m_sleepTimer;         // окон Android не видно — отсчёт до сна
+    QTimer m_idleStopTimer;      // все окна Android закрыты 10 мин — остановить сессию, чтобы не сажать батарею
     bool m_windows = false;      // у Android есть окна на столе
     bool m_asleep = false;       // так решил стол
     bool m_sleepSent = false;    // так сказано Android (заморожен — скажем, когда оттает)

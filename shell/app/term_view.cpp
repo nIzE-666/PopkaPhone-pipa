@@ -12,6 +12,7 @@
 #include <QSGTextNode>
 #include <QSGTransformNode>
 #include <QTextLayout>
+#include <QTouchEvent>
 
 #include <algorithm>
 #include <cmath>
@@ -83,8 +84,18 @@ TermView::TermView(QQuickItem *parent)
     setFlag(ItemHasContents);
     setFlag(ItemAcceptsInputMethod);
     setAcceptedMouseButtons(Qt::AllButtons);
+    setAcceptTouchEvents(true);
     setClip(true);
     setCursor(Qt::IBeamCursor);
+
+    m_longPressTimer.setSingleShot(true);
+    m_longPressTimer.setInterval(450);
+    connect(&m_longPressTimer, &QTimer::timeout, this, [this] {
+        if (m_touchId >= 0 && !m_touchScrolled) {
+            m_touchLongFired = true;
+            emit menuRequested(m_touchStart.x(), m_touchStart.y());
+        }
+    });
 
     // палитра — тона стола (DeskStyle): 16 своих, дальше — куб 6 × 6 × 6 и серые, как у xterm
     m_fg = QColor(0xec, 0xe9, 0xe3);       // DeskStyle.text
@@ -667,6 +678,12 @@ void TermView::keyPressEvent(QKeyEvent *e)
         return copy();
     if ((ctrl && shift && key == Qt::Key_V) || (cmd && key == Qt::Key_V))
         return paste();
+    if (ctrl && (key == Qt::Key_Plus || key == Qt::Key_Equal))
+        return emit shortcut(QStringLiteral("zoom"), 1);
+    if (ctrl && shift && key == Qt::Key_Underscore)
+        return emit shortcut(QStringLiteral("zoom"), -1);
+    if (ctrl && !shift && key == Qt::Key_0)
+        return emit shortcut(QStringLiteral("zoom"), 0);
     if (ctrl && !shift && !alt && key >= Qt::Key_1 && key <= Qt::Key_9)
         return emit shortcut(QStringLiteral("select"), key == Qt::Key_9 ? -1 : key - Qt::Key_1);
     if (shift && !ctrl && !alt && s() && !s()->screen().altScreen()) {
@@ -975,4 +992,120 @@ void TermView::wheelEvent(QWheelEvent *e)
         return;
     }
     scrollLines(-px / m_cellH);
+}
+
+void TermView::resetTouch()
+{
+    m_touchId = -1;
+    m_touchScrolled = false;
+    m_touchLongFired = false;
+    m_touchAltAcc = 0;
+    m_pinchDist = 0;
+    m_longPressTimer.stop();
+}
+
+void TermView::touchUngrabEvent()
+{
+    resetTouch();
+    QQuickItem::touchUngrabEvent();
+}
+
+void TermView::touchEvent(QTouchEvent *e)
+{
+    const auto type = e->type();
+    if (type == QEvent::TouchCancel) {
+        resetTouch();
+        e->accept();
+        return;
+    }
+    const auto &points = e->points();
+    if (points.size() >= 2) {
+        m_longPressTimer.stop();
+        m_touchScrolled = true;
+        const QPointF d = points[0].position() - points[1].position();
+        const qreal dist = std::hypot(d.x(), d.y());
+        if (m_pinchDist > 0) {
+            if (dist - m_pinchDist > 26) {
+                emit shortcut(QStringLiteral("zoom"), 1);
+                m_pinchDist = dist;
+            } else if (m_pinchDist - dist > 26) {
+                emit shortcut(QStringLiteral("zoom"), -1);
+                m_pinchDist = dist;
+            }
+        } else {
+            m_pinchDist = dist;
+        }
+        e->accept();
+        return;
+    }
+    m_pinchDist = 0;
+
+    if (type == QEvent::TouchBegin) {
+        resetTouch();
+        if (points.isEmpty()) {
+            e->ignore();
+            return;
+        }
+        forceActiveFocus(Qt::MouseFocusReason);
+        const auto &p = points.constFirst();
+        m_touchId = p.id();
+        m_touchStart = m_touchLast = p.position();
+        m_longPressTimer.start();
+        e->accept();
+        return;
+    }
+
+    if (m_touchId < 0) {
+        e->ignore();
+        return;
+    }
+    e->accept();
+    const auto it = std::find_if(points.cbegin(), points.cend(),
+                                 [this](const QEventPoint &pt) { return pt.id() == m_touchId; });
+    if (it == points.cend()) {
+        if (type == QEvent::TouchEnd)
+            resetTouch();
+        return;
+    }
+
+    const QPointF pos = it->position();
+    const QPointF fromStart = pos - m_touchStart;
+    if (!m_touchScrolled && QPointF::dotProduct(fromStart, fromStart) > 64.0) {
+        m_touchScrolled = true;
+        m_longPressTimer.stop();
+    }
+
+    if (type == QEvent::TouchEnd || it->state() == QEventPoint::State::Released) {
+        if (!m_touchScrolled && !m_touchLongFired) {
+            if (m_hasSel)
+                clearSelection();
+            else if (s() && s()->screen().mouseMode()) {
+                reportMouse(0, true, m_touchStart, Qt::NoModifier);
+                reportMouse(0, false, m_touchStart, Qt::NoModifier);
+            }
+        }
+        resetTouch();
+        return;
+    }
+
+    const qreal dy = pos.y() - m_touchLast.y();
+    m_touchLast = pos;
+    if (!m_touchScrolled || qFuzzyIsNull(dy) || !s())
+        return;
+
+    TermSession *ses = s();
+    const term::Screen &sc = ses->screen();
+    if (sc.mouseMode() || (sc.altScreen() && sc.alternateScroll())) {
+        m_touchAltAcc += dy;
+        while (std::abs(m_touchAltAcc) >= m_cellH) {
+            const bool up = m_touchAltAcc > 0;
+            if (sc.mouseMode())
+                reportMouse(up ? 64 : 65, true, m_touchStart, Qt::NoModifier);
+            else
+                ses->input(sc.appCursor() ? (up ? "\x1bOA" : "\x1bOB") : (up ? "\x1b[A" : "\x1b[B"));
+            m_touchAltAcc -= up ? m_cellH : -m_cellH;
+        }
+    } else {
+        scrollLines(-dy / m_cellH);
+    }
 }

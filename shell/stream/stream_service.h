@@ -83,7 +83,8 @@ public:
     // источники кадра: экран телефона (окно оболочки) и рабочий стол — экран только для трансляции; зритель
     // выбирает (сообщение Mode), по умолчанию — экран телефона
     enum Source { Phone = 0, Desktop = 1 };
-    void attach(QQuickWindow *window);
+    void attach(QQuickWindow *window, StreamScreen *localDesktop = nullptr, int sceneRotation = 0);
+    void setNativeRotation(int rotation);
     void attachDesktop(StreamScreen *desktop);
 
     bool enabled() const { return m_enabled; }
@@ -118,6 +119,8 @@ public:
     // сменить раскладку ("EN" / "RU"; щелчок по подписи на панели): держит зритель — просьба ему, layout сменится, когда
     // он ответит; иначе — клавиатуре телефона, сразу
     Q_INVOKABLE void setLayout(const QString &layout);
+    // ввод с экранной клавиатуры стола (планшет) — окну клиента Wayland (браузер, Waydroid) и элементам без IM
+    void injectKey(bool down, int qtKey, int modifiers, const QString &text);
     // «Тест» в «Настройках» → «Без дока»: стол уходит (как «закрыть сессию»), а приставка сразу делает с монитором то, что
     // без дела (сон или приглушение) — не ждать 10 минут. Только приставке (зритель с экраном без дока)
     Q_INVOKABLE void idleTest();
@@ -202,6 +205,7 @@ private:
 
     QPointer<QQuickWindow> m_window;
     StreamScreen *m_desktop = nullptr;
+    StreamScreen *m_localDesktop = nullptr;
     int m_source = Phone;
     std::shared_ptr<Shared> m_shared;
     std::unique_ptr<Gl> m_gl[2];

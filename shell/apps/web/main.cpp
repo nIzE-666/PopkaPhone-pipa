@@ -89,6 +89,8 @@ static QPalette darkPalette()
 static int runApp(QGuiApplication &app, const QString &url, const QString &name)
 {
     app.setApplicationName("naomi-webapp");
+    qputenv("QT_QUICK_CONTROLS_STYLE", "Fusion");
+    QGuiApplication::setPalette(darkPalette());
     app.setDesktopFileName(name);
     const QString data = QDir::homePath() + "/.local/share/naomi/webapp/" + name;
     const QString cache = QDir::homePath() + "/.cache/naomi/webapp/" + name;
@@ -121,6 +123,9 @@ static int runApp(QGuiApplication &app, const QString &url, const QString &name)
 
 int main(int argc, char **argv)
 {
+    if (!qEnvironmentVariableIsSet("QTWEBENGINE_CHROMIUM_FLAGS"))
+        qputenv("QTWEBENGINE_CHROMIUM_FLAGS",
+                "--enable-gpu-rasterization --enable-smooth-scrolling --ignore-gpu-blocklist");
     // до QGuiApplication: общий контекст GL движку и окну
     QtWebEngineQuick::initialize();
     // Qt в Ubuntu собран под настольный OpenGL, а GPU телефона (Android EGL) умеет только OpenGL ES.

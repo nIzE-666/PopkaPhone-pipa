@@ -4,6 +4,7 @@
 #pragma once
 
 #include "bus_object.h"
+#include "device_profile.h"
 
 #include <QDateTime>
 #include <QVector>
@@ -45,7 +46,7 @@ private:
         bool discharging;
     };
 
-    QString m_cpuZone, m_skinZone;
+    DeviceProfile::ThermalPaths m_thermal;
     bool m_stateKnown = false;
     qint64 m_plugChangedAt = 0;   // когда подключили или отключили зарядку (служба видела сама); 0 — не видела
     struct Cache

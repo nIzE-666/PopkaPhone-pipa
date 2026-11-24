@@ -23,8 +23,10 @@ DeskWindow {
     property var screen                      // Settings экрана (Desktop.qml)
     property var pad                         // Settings геймпада (Desktop.qml)
     property var touch                       // Settings трекпада (Desktop.qml)
+    property var ui                          // Settings интерфейса (Desktop.qml)
+    property var term                        // Settings терминала (Desktop.qml)
     property Item desk
-    property string page: "screen"           // screen, wall, lock, mouse, more, touch, battery, health, pad
+    property string page: "screen"           // screen, wall, interface, lock, mouse, more, touch, battery, health, pad, system, vpn
     // панель слева: ширина — от sideMin до sideMax, раздел справа всегда pageW (как было: окно 880 при панели 170)
     readonly property int sideMin: 140
     readonly property int sideMax: 340
@@ -41,7 +43,7 @@ DeskWindow {
     // Стол стал ниже (окно Mac) — окно ниже, своё число в файле остаётся
     readonly property real minH: barH + 16 + nav.usedHeight + 16
     readonly property real maxH: area ? area.height - 36 : 900
-    width: sideW + pageW
+    width: DeskStyle.tablet && area ? Math.min(sideW + pageW, area.width) : sideW + pageW
     height: Math.max(minH, Math.min(maxH, place.height))
 
     barContent: Text {
@@ -159,17 +161,20 @@ DeskWindow {
     // Разделы — по требованию: открытый создаётся сразу, остальные — фоном по частям, когда стол в покое (или сразу,
     // если в раздел зашли раньше). Было — все пять при открытии окна: 111 мс в потоке интерфейса, стол стоял (прогон
     // стола 19 ноября 2026, docs/DESKTOP.md, «Прогон стола»)
-    readonly property var loaders: ({ screen: screenLoad, wall: wallLoad, lock: lockLoad, mouse: mouseLoad, more: moreLoad,
-                                      touch: touchLoad, battery: batteryLoad, health: healthLoad, pad: padLoad })
-    readonly property var pageFiles: ({ screen: "ScreenPage.qml", wall: "WallPage.qml", lock: "LockPage.qml",
+    readonly property var loaders: ({ screen: screenLoad, wall: wallLoad, interface: ifaceLoad, lock: lockLoad,
+                                      mouse: mouseLoad, more: moreLoad, touch: touchLoad, battery: batteryLoad,
+                                      health: healthLoad, pad: padLoad, system: sysLoad, vpn: vpnLoad })
+    readonly property var pageFiles: ({ screen: DeskStyle.tablet ? "TabletScreenPage.qml" : "ScreenPage.qml",
+                                        wall: "WallPage.qml", interface: "InterfacePage.qml", lock: "LockPage.qml",
                                         mouse: "MousePage.qml", more: "MouseMorePage.qml", touch: "TrackpadPage.qml",
                                         battery: "BatteryPage.qml",
-                                        health: "HealthPage.qml", pad: "GamepadPage.qml" })
+                                        health: "HealthPage.qml", pad: "GamepadPage.qml",
+                                        system: "SystemPage.qml", vpn: "VpnPage.qml" })
     readonly property Item current: loaders[page] ? loaders[page].item : null
     property var loaded: ({})
     property int loadedCount: 0
     function loadPage(name) {   // sw — начальным свойством: он есть до первых привязок раздела
-        if (loaded[name])
+        if (loaded[name] || (name === "vpn" && !naomiSystemTools.vpnAvailable))
             return
         loaded[name] = true
         ++loadedCount
@@ -242,7 +247,8 @@ DeskWindow {
             width: parent.width - x
             height: parent.height
             clip: contentHeight > height
-            interactive: false
+            interactive: DeskStyle.tablet
+            acceptedButtons: DeskStyle.tablet ? Qt.NoButton : Qt.LeftButton
             contentHeight: 22 + (sw.current ? sw.current.implicitHeight : 0) + 26
             // окно выше или раздел короче — не оставаться прокрученным за конец
             function fit() { contentY = Math.max(0, Math.min(contentY, contentHeight - height)) }
@@ -254,6 +260,7 @@ DeskWindow {
                 // открытый раздел — сразу; зашли в тот, что собирается фоном, — досоздать сразу (asynchronous → false)
                 Loader { id: screenLoad; width: parent.width; visible: sw.page === "screen"; asynchronous: !visible }
                 Loader { id: wallLoad; width: parent.width; visible: sw.page === "wall"; asynchronous: !visible }
+                Loader { id: ifaceLoad; width: parent.width; visible: sw.page === "interface"; asynchronous: !visible }
                 Loader { id: lockLoad; width: parent.width; visible: sw.page === "lock"; asynchronous: !visible }
                 Loader { id: mouseLoad; width: parent.width; visible: sw.page === "mouse"; asynchronous: !visible }
                 Loader { id: moreLoad; width: parent.width; visible: sw.page === "more"; asynchronous: !visible }
@@ -261,6 +268,8 @@ DeskWindow {
                 Loader { id: batteryLoad; width: parent.width; visible: sw.page === "battery"; asynchronous: !visible }
                 Loader { id: healthLoad; width: parent.width; visible: sw.page === "health"; asynchronous: !visible }
                 Loader { id: padLoad; width: parent.width; visible: sw.page === "pad"; asynchronous: !visible }
+                Loader { id: sysLoad; width: parent.width; visible: sw.page === "system"; asynchronous: !visible }
+                Loader { id: vpnLoad; width: parent.width; visible: sw.page === "vpn"; asynchronous: !visible }
             }
         }
         ThreadBar {   // «Нить» у правого края; снизу — мимо скругления угла окна

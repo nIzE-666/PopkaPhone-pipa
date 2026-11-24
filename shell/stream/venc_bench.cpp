@@ -138,12 +138,13 @@ int main(int argc, char **argv)
     }
 
     VenusEncoder enc;
-    if (!enc.open(s))
+    if (!enc.open(s) || !enc.prepareQueues(4, 4))
         return 1;
-    const VenusEncoder::Layout L = enc.layout();
+    const auto queues = enc.queues();
+    const auto L = queues.input;
     fprintf(stderr, "кодер: %s %dx%d, %d к/с, %.1f Мбит/с; NV12: строка %d, %d+%d строк, %zu байт; сжатый ≤ %zu\n",
             s.hevc ? "HEVC" : "H.264", s.width, s.height, s.fps, s.bitrate / 1e6, L.stride, L.yScan, L.uvScan,
-            L.size, enc.packetBufferSize());
+            L.size, queues.packet);
 
     // источник — текстура RGBA размером с кадр (как копия кадра оболочки)
     GLuint srcTex, srcFbo;
@@ -157,10 +158,12 @@ int main(int argc, char **argv)
     GLuint vao;
     glGenVertexArrays(1, &vao);
 
-    constexpr int kInputs = 4, kOutputs = 4;
-    std::vector<GrallocBuffer> in(kInputs), outBufs(kOutputs);
+    std::vector<GrallocBuffer> in(queues.inputs), outBufs(queues.outputs);
+    std::vector<GrallocBuffer> inExtra(queues.inputExtra ? queues.inputs : 0),
+        outExtra(queues.packetExtra ? queues.outputs : 0);
     std::vector<VenusEncoder::Buffer> encIn, encOut;
-    for (auto &b : in) {
+    for (unsigned i = 0; i < queues.inputs; ++i) {
+        auto &b = in[i];
         if (!grallocAllocateLinear(b, L.size, L.stride / 4,
                                    kGrallocHwRender | kGrallocHwTexture | kGrallocHwVideoEncoder | kGrallocSwReadRarely)
             || !grallocBindGl(b, dpy))
@@ -170,13 +173,26 @@ int main(int argc, char **argv)
             return 1;
         }
         encIn.push_back({b.fd, b.size, nullptr});
+        if (!inExtra.empty()) {
+            if (!grallocAllocateExtra(inExtra[i], queues.inputExtra))
+                return 1;
+            encIn.back().extraFd = inExtra[i].fd;
+            encIn.back().extraSize = inExtra[i].size;
+        }
     }
-    for (auto &b : outBufs) {
-        if (!grallocAllocate(b, int(enc.packetBufferSize()), 1, kGrallocBlob,
+    for (unsigned i = 0; i < queues.outputs; ++i) {
+        auto &b = outBufs[i];
+        if (!grallocAllocate(b, int(queues.packet), 1, kGrallocBlob,
                              kGrallocSwReadOften | kGrallocHwVideoEncoder)
             || !grallocMapForCpu(b))
             return 1;
         encOut.push_back({b.fd, b.size, b.map});
+        if (!outExtra.empty()) {
+            if (!grallocAllocateExtra(outExtra[i], queues.packetExtra))
+                return 1;
+            encOut.back().extraFd = outExtra[i].fd;
+            encOut.back().extraSize = outExtra[i].size;
+        }
     }
     if (!enc.start(encIn, encOut))
         return 1;
@@ -186,10 +202,15 @@ int main(int argc, char **argv)
         return 1;
 
     FILE *f = fopen(out, "wb");
-    std::vector<bool> free(kInputs, true);
+    if (!f) {
+        perror(out);
+        return 1;
+    }
+    std::vector<bool> free(queues.inputs, true);
     std::map<int64_t, int64_t> queuedAt;   // метка кадра → когда отдан кодеру
     std::vector<double> packMs, encMs;
-    size_t bytes = 0, keys = 0, done = 0;
+    size_t bytes = 0, keys = 0;
+    std::atomic<size_t> done{0};
     const int64_t period = 1000000 / s.fps, t0 = nowUs();
     int64_t next = t0;
     int sent = 0;
@@ -227,6 +248,7 @@ int main(int argc, char **argv)
         return int(std::find(free.begin(), free.end(), true) - free.begin());
     };
 
+    bool ok = true;
     while (sent < frames) {
         if (!flat) {   // ровно с частотой кадров
             while (nowUs() < next)
@@ -234,8 +256,14 @@ int main(int argc, char **argv)
             next += period;
         }
         int slot = -1;
-        while ((slot = freeSlot()) >= kInputs)
+        const int64_t deadline = nowUs() + 2000000;
+        while ((slot = freeSlot()) >= int(queues.inputs) && nowUs() < deadline)
             usleep(200);
+        if (slot >= int(queues.inputs)) {
+            fprintf(stderr, "venus: кодер не вернул буфер за 2 с\n");
+            ok = false;
+            break;
+        }
         {
             std::lock_guard<std::mutex> g(lock);
             free[slot] = false;
@@ -256,8 +284,10 @@ int main(int argc, char **argv)
         packMs.push_back((nowUs() - packStart) / 1000.0);
         std::lock_guard<std::mutex> g(lock);
         const int64_t queued = nowUs();
-        if (!enc.encode(slot, ts))
-            return 1;
+        if (!enc.encode(slot, ts)) {
+            ok = false;
+            break;
+        }
         queuedAt[ts] = queued;
         ++sent;
     }
@@ -266,18 +296,18 @@ int main(int argc, char **argv)
     stop = true;
     taker.join();
     const double seconds = (nowUs() - t0) / 1e6;
+    const size_t encoded = done.load();
     fclose(f);
     printf("{\"codec\": \"%s\", \"size\": \"%dx%d\", \"fps_target\": %d, \"paced\": %s, \"frames\": %d, "
            "\"encoded\": %zu, \"seconds\": %.2f, \"fps\": %.1f, \"pack_ms\": {\"median\": %.2f, \"p95\": %.2f}, "
            "\"encode_ms\": {\"median\": %.2f, \"p95\": %.2f, \"max\": %.2f}, \"mbps\": %.2f, \"key_packets\": %zu, "
            "\"file\": \"%s\"}\n",
-           s.hevc ? "hevc" : "h264", s.width, s.height, s.fps, flat ? "false" : "true", sent, done, seconds,
-           done / seconds, pct(packMs, 0.5), pct(packMs, 0.95), pct(encMs, 0.5), pct(encMs, 0.95),
+           s.hevc ? "hevc" : "h264", s.width, s.height, s.fps, flat ? "false" : "true", sent, encoded, seconds,
+           encoded / seconds, pct(packMs, 0.5), pct(packMs, 0.95), pct(encMs, 0.5), pct(encMs, 0.95),
            pct(encMs, 1.0), bytes * 8 / seconds / 1e6, keys, out);
     enc.close();
-    for (auto &b : in)
-        grallocFree(b, dpy);
-    for (auto &b : outBufs)
-        grallocFree(b, dpy);
-    return 0;
+    for (auto *pool : {&in, &outBufs, &inExtra, &outExtra})
+        for (auto &b : *pool)
+            grallocFree(b, dpy);
+    return ok && encoded == size_t(frames) ? 0 : 1;
 }

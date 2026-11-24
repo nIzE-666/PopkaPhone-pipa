@@ -6,6 +6,7 @@
 #include <QObject>
 #include <QSize>
 #include <QTimer>
+#include <QVariantList>
 
 // служба naomi-shell перезапускает оболочку с этим кодом выхода (RestartForceExitStatus)
 inline constexpr int kRestartExitCode = 75;
@@ -21,9 +22,12 @@ class DisplayStats : public QObject
     Q_PROPERTY(qulonglong frames READ frames NOTIFY changed)
     Q_PROPERTY(qulonglong drops READ drops NOTIFY changed)
     Q_PROPERTY(bool available READ available CONSTANT)
+    Q_PROPERTY(QVariantList refreshRates READ refreshRates CONSTANT)
     // кадр, который рисует Qt, в пикселях: меньше панели — его растягивает дисплей (docs/DISPLAY.md)
     Q_PROPERTY(QSize renderSize READ renderSize CONSTANT)
     Q_PROPERTY(QSize panelSize READ panelSize CONSTANT)
+    Q_PROPERTY(int sceneRotation READ sceneRotation WRITE setSceneRotation NOTIFY sceneRotationChanged)
+    Q_PROPERTY(bool autoRotate READ autoRotate WRITE setAutoRotate NOTIFY autoRotateChanged)
 
 public:
     explicit DisplayStats(QObject *parent = nullptr);
@@ -38,7 +42,14 @@ public:
     bool available() const { return m_snapshot != nullptr; }
     QSize renderSize() const;
     QSize panelSize() const;
+    int sceneRotation() const { return m_sceneRotation; }
+    bool autoRotate() const { return m_autoRotate; }
+    QVariantList refreshRates() const;
 
+    void setSceneRotation(int rotation);
+    void setAutoRotate(bool enabled);
+    Q_INVOKABLE void chooseOrientation(int rotation);
+    Q_INVOKABLE void toggleOrientation();
     Q_INVOKABLE bool setRefresh(int hz);
     // ширина кадра (1080 — во всю панель, 720 — 720 × 1560): запомнить и перезапустить оболочку
     Q_INVOKABLE void setRenderWidth(int width);
@@ -49,9 +60,13 @@ public:
 
 signals:
     void changed();
+    void sceneRotationChanged();
+    void autoRotateChanged();
     void restartRequested();
 
 private:
+    int m_sceneRotation = 0;
+    bool m_autoRotate = false;
     NaomiFrameSnapshotFn m_snapshot = nullptr;
     NaomiSetRefreshFn m_setRefresh = nullptr;
     NaomiFrameSnapshot m_s{};

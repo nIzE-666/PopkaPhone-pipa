@@ -13,6 +13,7 @@
 #include <QHash>
 #include <QObject>
 #include <QStringList>
+#include <QUrl>
 #include <QVariant>
 
 class FilesService : public QObject
@@ -27,10 +28,10 @@ class FilesService : public QObject
     Q_PROPERTY(bool canUndo READ canUndo NOTIFY opsChanged)
     Q_PROPERTY(QString undoWhat READ undoWhat NOTIFY opsChanged)
     Q_PROPERTY(bool hasClipboard READ hasClipboard NOTIFY clipboardChanged)
-    Q_PROPERTY(int wallpaperVersion READ wallpaperVersion NOTIFY wallpaperChanged)
     // обои стола: собрание (картинки — «Настройки» → «Обои») и какие стоят — путь в нём; "" — без картинки
     Q_PROPERTY(QStringList wallpapers READ wallpapers NOTIFY wallpaperChanged)
     Q_PROPERTY(QString wallpaper READ wallpaper NOTIFY wallpaperChanged)
+    Q_PROPERTY(QUrl desktopWallpaper READ desktopWallpaper NOTIFY wallpaperChanged)
 
 public:
     explicit FilesService(QObject *parent = nullptr);
@@ -45,9 +46,9 @@ public:
     bool canUndo() const { return m_ops.canUndo(); }
     QString undoWhat() const { return m_ops.undoWhat(); }
     bool hasClipboard() const { return !m_clipboard.isEmpty(); }
-    int wallpaperVersion() const { return m_wallpaperVersion; }
     QStringList wallpapers() const;
     QString wallpaper() const;
+    QUrl desktopWallpaper() const;
 
     Q_INVOKABLE bool isStarred(const QString &path) const { return m_starred.contains(path); }
     Q_INVOKABLE void setStarred(const QStringList &paths, bool on);

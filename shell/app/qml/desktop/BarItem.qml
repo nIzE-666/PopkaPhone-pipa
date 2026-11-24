@@ -12,6 +12,7 @@ Item {
     readonly property bool pressed: tap.pressed
     readonly property real dy: pressed ? 1 : 0
     signal clicked(int modifiers)
+    signal longPressed()
     height: DeskStyle.appH
 
     Rectangle {
@@ -23,5 +24,10 @@ Item {
         visible: item.hovered || item.pressed || item.open
     }
     HoverHandler { id: hover; cursorShape: Qt.PointingHandCursor }
-    TapHandler { id: tap; onTapped: item.clicked(tap.point.modifiers) }
+    TapHandler {
+        id: tap
+        longPressThreshold: 0.45
+        onTapped: item.clicked(tap.point.modifiers)
+        onLongPressed: item.longPressed()
+    }
 }

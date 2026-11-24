@@ -56,10 +56,19 @@ public:
         int uvScan = 0;
         size_t size = 0;      // байт в кадре
     };
+    struct Queues {
+        Layout input;
+        size_t inputExtra = 0;
+        size_t packet = 0;
+        size_t packetExtra = 0;
+        unsigned inputs = 0, outputs = 0;
+    };
     struct Buffer {
         int fd = -1;
         size_t size = 0;
         const void *map = nullptr;   // для выходных: вид для процессора
+        int extraFd = -1;
+        size_t extraSize = 0;
     };
     struct Packet {
         std::vector<uint8_t> data;   // H.264/HEVC Annex B
@@ -69,8 +78,8 @@ public:
 
     ~VenusEncoder();
     bool open(const Settings &s);
-    const Layout &layout() const { return m_layout; }
-    size_t packetBufferSize() const { return m_packetSize; }   // выходной буфер (сжатый кадр)
+    bool prepareQueues(unsigned inputs, unsigned outputs);
+    const Queues &queues() const { return m_queues; }
     bool start(const std::vector<Buffer> &inputs, const std::vector<Buffer> &outputs);
     bool encode(int input, int64_t timestampUs);   // кадр готов в inputs[input]
     bool requestKeyFrame();
@@ -90,12 +99,12 @@ public:
 
 private:
     bool setControl(uint32_t id, int32_t value, const char *name);
+    bool setVendorControl(uint32_t id, int32_t value, const char *name);
     bool queueOutput(int index);
 
     int m_fd = -1;
-    Settings m_settings;
-    Layout m_layout;
-    size_t m_packetSize = 0;
+    Queues m_queues;
+    bool m_kona = false;
     std::vector<Buffer> m_inputs, m_outputs;
     bool m_streaming = false;
 };

@@ -380,6 +380,8 @@ Window {
             case "reload": if (t) t.view.reload(); break
             case "back": if (t) t.view.goBack(); break
             case "forward": if (t) t.view.goForward(); break
+            case "toggle-dark": if (t) t.view.darkAllowed = !t.view.darkAllowed; break
+            case "find": if (t) t.view.findText(m.text || ""); break
             case "duplicate": if (t) win.newTab(String(t.view.url), { after: t.id }); break
             case "restore-closed": win.restoreClosed(); break
             case "cycle": win.cycle(m.step); break
@@ -442,11 +444,45 @@ Window {
         function onIconSaved(site, url) { win.changed() }
     }
 
+    function cleanUserAgent(ua) {
+        return String(ua || "")
+            .replace(/\s*QtWebEngine\/[0-9.]+/g, "")
+            .replace(/Linux aarch64/g, "Linux x86_64")
+            .replace(/\s{2,}/g, " ")
+            .trim()
+    }
+    function applyCleanProfileIdentity(p) {
+        const cleanUa = cleanUserAgent(p.httpUserAgent)
+        p.httpUserAgent = cleanUa
+        if (p.clientHints) {
+            const m = cleanUa.match(/Chrome\/([0-9]+(?:\.[0-9]+)*)/)
+            const ver = m ? m[1] : "134.0.0.0"
+            p.clientHints.arch = "x86"
+            p.clientHints.bitness = "64"
+            p.clientHints.platform = "Linux"
+            p.clientHints.isMobile = false
+            p.clientHints.fullVersion = ver
+            p.clientHints.fullVersionList = {
+                "Chromium": ver,
+                "Google Chrome": ver,
+                "Not:A-Brand": "24.0.0.0"
+            }
+        }
+    }
+
     Component.onCompleted: {
         // профиль — когда все его свойства уже заданы: иначе движок берёт профиль «инкогнито» (проверено).
         // User-Agent — как у Chrome той же версии, без «QtWebEngine/…»: с ним часть сайтов считает браузер странным.
         profile = proto.instance()
         webFilter.attach(profile)   // реклама и слежка — мимо (web_filter.h)
+        // Google Sign-In (accounts.google.com): align navigator identity with auth headers
+        const gauth = WebEngine.script()
+        gauth.name = "naomi-google-auth"
+        gauth.sourceUrl = webScripts + "/google-auth.js"
+        gauth.injectionPoint = WebEngineScript.DocumentCreation
+        gauth.worldId = WebEngineScript.MainWorld
+        gauth.runsOnSubFrames = true
+        profile.userScripts.insert(gauth)
         // YouTube — в H.264, а не в AV1: видео процессором, AV1 ему не по силам (scripts/youtube-h264.js)
         const h264 = WebEngine.script()
         h264.name = "naomi-youtube-h264"
@@ -471,7 +507,7 @@ Window {
         scrollbar.runsOnSubFrames = true
         profile.userScripts.insert(scrollbar)
         profile.downloadPath = webDownloadDir
-        profile.httpUserAgent = profile.httpUserAgent.replace(/ QtWebEngine\/[0-9.]+/, "")
+        applyCleanProfileIdentity(profile)
         restoreSession()
         spareLater.start()   // запас новой вкладки — когда вкладки прошлого раза уже грузятся
     }

@@ -10,6 +10,7 @@ import QtQuick
 Item {
     id: pop
     property bool open: false
+    property bool clock24h: true
     property var battery               // DeskBattery
 
     width: 348
@@ -52,9 +53,12 @@ Item {
     function grp(v) { return String(Math.round(Math.abs(v))).replace(/\B(?=(\d{3})+(?!\d))/g, " ") }
     function sgn(v) { return v >= 0.5 ? "+" : v <= -0.5 ? "−" : "" }
     function fx(v, d) { return v.toFixed(d).replace(".", ",") }
-    function clock(t) {   // как часы панели: 6:52 PM
+    function clock(t) {   // как часы панели: 18:52 или 6:52 PM
         const d = new Date(t * 1000), h = d.getHours(), m = d.getMinutes()
-        return (h % 12 === 0 ? 12 : h % 12) + ":" + (m < 10 ? "0" : "") + m + (h < 12 ? " AM" : " PM")
+        const mm = (m < 10 ? "0" : "") + m
+        if (pop.clock24h)
+            return (h < 10 ? "0" : "") + h + ":" + mm
+        return (h % 12 === 0 ? 12 : h % 12) + ":" + mm + (h < 12 ? " AM" : " PM")
     }
     readonly property var f: battery.forecast
     readonly property real watts: battery.currentMa * (s.voltageMv || 0) / 1e6

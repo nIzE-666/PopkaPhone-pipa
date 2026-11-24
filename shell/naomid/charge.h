@@ -30,9 +30,14 @@ class Charge : public BusObject
     Q_PROPERTY(int Start READ start)          // …и снова ниже
     Q_PROPERTY(qlonglong LastFull READ lastFull)            // когда последний раз был 100 % (с эпохи), 0 — не видела
     Q_PROPERTY(qlonglong NextCalibration READ nextCalibration)   // когда калибровка (0 — выключена или не нужна)
+    // чем держится предел: google (пороги google_charger, Pixel), night (night_charging ядра Xiaomi, Pad 6 — стоп заряда
+    // только от 80 %), none (нечем — режим off)
+    Q_PROPERTY(QString Backend READ backend)
+    Q_PROPERTY(int MinUpper READ minUpper)    // ниже этого верха держать нечем (night — 80, google — 50)
 
 public:
     explicit Charge(QObject *parent = nullptr);
+    ~Charge() override;
 
     QString mode() const { return prop("Mode").toString(); }
     int upper() const { return prop("Upper").toInt(); }
@@ -48,6 +53,8 @@ public:
     int start() const { return prop("Start").toInt(); }
     qlonglong lastFull() const { return prop("LastFull").toLongLong(); }
     qlonglong nextCalibration() const { return prop("NextCalibration").toLongLong(); }
+    QString backend() const { return prop("Backend").toString(); }
+    int minUpper() const { return prop("MinUpper").toInt(); }
 
 public slots:
     Q_SCRIPTABLE void SetMode(const QString &mode);
@@ -71,8 +78,15 @@ private:
     void tick();
     void save();
     void setCal(Cal phase, bool isNew = false);
-    bool writeLevels(int stop, int start);
+    bool writeLevels(int stop, int start, int level);
+    bool writeNight(bool hold);
     void applyDefender();
+    bool google() const { return backend() == QLatin1String("google"); }
+    bool night() const { return backend() == QLatin1String("night"); }
+    bool limited() const { return google() || night(); }
+
+    bool m_nightHold = false;        // night: заряд остановлен (night_charging = 1)
+    int m_stopNow = 100, m_startNow = 0;   // night: пороги, которые держит служба (в ядре их нет)
 
     QTimer m_timer, m_soon;
     qint64 m_lastFull = 0, m_lastCal = 0, m_serialSince = 0;

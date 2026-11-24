@@ -26,6 +26,7 @@ enum : int {
     kGrallocBlob = 0x21,
     kGrallocSwReadOften = 0x3,
     kGrallocSwReadRarely = 0x2,
+    kGrallocSwWriteOften = 0x30,
     kGrallocHwTexture = 0x100,
     kGrallocHwRender = 0x200,
     kGrallocHwVideoEncoder = 0x10000,
@@ -36,6 +37,7 @@ bool grallocAllocate(GrallocBuffer &b, int width, int height, int format, int us
 // иногда выравнивает: 512 → 768 пикселей, и тогда хвост каждой строки текстуре не виден). widthHint — с какой
 // ширины начать; не совпала со строкой — заново шириной строки.
 bool grallocAllocateLinear(GrallocBuffer &b, size_t bytes, int widthHint, int usage);
+bool grallocAllocateExtra(GrallocBuffer &b, size_t bytes);
 // EGLImage, текстура и кадровый буфер — в текущем контексте GL
 bool grallocBindGl(GrallocBuffer &b, EGLDisplay dpy);
 bool grallocMapForCpu(GrallocBuffer &b);

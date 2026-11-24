@@ -15,20 +15,27 @@ Item {
     property var st                       // TermState
     property Item area                    // стол без панели
     property bool active: false
+    property bool pinned: false
     property bool minimized: false
     property bool maximized: false
     property bool panelMode: false
+    property int extraKeysMode: 0         // 0 — авто (скрывается при физ. клавиатуре), 1 — всегда показать, 2 — скрыть
+    property int fontSize: 15
     property rect box                     // рамка окна с полосой (не развёрнутого)
     signal activated()
     signal closed()
     signal panelToggled()
     signal closeClicked(int modifiers)
     signal saveRequested()
+    signal fontSizePicked(int size)
     signal textMenu()                     // правая кнопка по тексту — «Копировать / Вставить»
 
     readonly property alias view: view
     readonly property bool barShown: !panelMode
     readonly property real barH: barShown ? DeskStyle.webBarH : 0
+    readonly property bool hwKeyboard: typeof naomiSystemTools !== "undefined" && naomiSystemTools !== null && naomiSystemTools.hardwareKeyboard
+    readonly property bool extraKeysShown: DeskStyle.tablet && (extraKeysMode === 1 || (extraKeysMode === 0 && !hwKeyboard))
+    readonly property real extraBarH: extraKeysShown ? 38 : 0
     readonly property rect frame: panelMode || maximized ? Qt.rect(0, 0, area.width, area.height) : box
     readonly property real e: DeskStyle.corner(width, height)
     readonly property size minSize: Qt.size(480, 280)
@@ -36,6 +43,23 @@ Item {
 
     function activate() { activated() }
     function takeFocus() { view.forceActiveFocus() }
+    function snapHalf(right) {
+        if (!area)
+            return
+        if (panelMode)
+            panelToggled()
+        maximized = false
+        const half = Math.floor(area.width / 2)
+        box = Qt.rect(right ? area.width - half : 0, 0, half, area.height)
+        saveRequested()
+    }
+    function setZoom(nextSize) {
+        const clamped = Math.max(10, Math.min(26, nextSize))
+        if (clamped !== fontSize) {
+            fontSize = clamped
+            fontSizePicked(clamped)
+        }
+    }
     property bool closing: false
     property bool shown: false
     Component.onCompleted: shown = true
@@ -77,13 +101,14 @@ Item {
         id: view
         y: win.barH
         width: win.width
-        height: win.height - win.barH
+        height: Math.max(40, win.height - win.barH - win.extraBarH)
         session: naomiTerm.activeSession
         fontFamily: DeskStyle.mono
-        fontSize: 14
+        fontSize: win.fontSize
         pixel: naomiDesk.pixelScale
         // мигает, только пока окно в фокусе и стол кто-то смотрит
-        blink: win.active && !win.minimized && naomiStream.connected && naomiStream.desktop && !naomiStream.deskAway
+        blink: win.active && !win.minimized && (DeskStyle.tablet ? naomiPower.displayOn
+                                                : naomiStream.connected && naomiStream.desktop && !naomiStream.deskAway)
         onGridChanged: naomiTerm.setSize(cols, rows)
         Component.onCompleted: naomiTerm.setSize(cols, rows)
         onMenuRequested: win.textMenu()
@@ -96,6 +121,96 @@ Item {
                 naomiTerm.cycle(arg)
             else if (name === "select")
                 naomiTerm.select(arg)
+            else if (name === "zoom")
+                win.setZoom(arg === 0 ? 15 : win.fontSize + arg)
+        }
+    }
+
+    // ---------- сенсорная панель спецклавиш (планшет) ----------
+    Item {
+        id: extraKeys
+        visible: win.extraBarH > 0
+        y: win.height - win.extraBarH
+        width: win.width
+        height: win.extraBarH
+        Rectangle {
+            width: parent.width; height: 1
+            color: DeskStyle.amberA(DeskStyle.line)
+        }
+        Flickable {
+            anchors.fill: parent
+            anchors.leftMargin: 8
+            anchors.rightMargin: 8
+            anchors.topMargin: 5
+            anchors.bottomMargin: 5
+            contentWidth: keyRow.width
+            contentHeight: height
+            flickableDirection: Flickable.HorizontalFlick
+            boundsBehavior: Flickable.StopAtBounds
+            clip: true
+            Row {
+                id: keyRow
+                spacing: 6
+                height: parent.height
+                Repeater {
+                    model: [
+                        { label: "ESC", seq: "\x1b" },
+                        { label: "TAB", seq: "\t" },
+                        { label: "^C", seq: "\x03", danger: true },
+                        { label: "^D", seq: "\x04" },
+                        { label: "^R", seq: "\x12" },
+                        { label: "←", seq: "\x1b[D" },
+                        { label: "↓", seq: "\x1b[B" },
+                        { label: "↑", seq: "\x1b[A" },
+                        { label: "→", seq: "\x1b[C" },
+                        { label: "|", seq: "|" },
+                        { label: "/", seq: "/" },
+                        { label: "~", seq: "~" },
+                        { label: "-", seq: "-" },
+                        { label: "COPY", act: "copy" },
+                        { label: "PASTE", act: "paste" },
+                        { label: "A−", act: "zoom-" },
+                        { label: "A+", act: "zoom+" }
+                    ]
+                    delegate: Rectangle {
+                        id: kbtn
+                        required property var modelData
+                        height: keyRow.height
+                        width: Math.max(40, ktxt.implicitWidth + 16)
+                        radius: 4
+                        color: ktap.pressed ? DeskStyle.amberA(0.22) : DeskStyle.surface
+                        border.width: 1
+                        border.color: modelData.danger ? DeskStyle.badA(0.45) : DeskStyle.amberA(DeskStyle.line)
+                        Text {
+                            id: ktxt
+                            anchors.centerIn: parent
+                            text: kbtn.modelData.label
+                            font.family: DeskStyle.mono
+                            font.pixelSize: 12
+                            color: kbtn.modelData.danger ? DeskStyle.bad : DeskStyle.text
+                        }
+                        TapHandler {
+                            id: ktap
+                            onTapped: {
+                                if (typeof naomiHaptics !== "undefined" && naomiHaptics)
+                                    naomiHaptics.tap(10)
+                                win.activate()
+                                win.takeFocus()
+                                if (kbtn.modelData.seq !== undefined)
+                                    view.sendRaw(kbtn.modelData.seq)
+                                else if (kbtn.modelData.act === "copy")
+                                    view.copy()
+                                else if (kbtn.modelData.act === "paste")
+                                    view.paste()
+                                else if (kbtn.modelData.act === "zoom-")
+                                    win.setZoom(win.fontSize - 1)
+                                else if (kbtn.modelData.act === "zoom+")
+                                    win.setZoom(win.fontSize + 1)
+                            }
+                        }
+                    }
+                }
+            }
         }
     }
 
@@ -120,6 +235,8 @@ Item {
             property bool dragging: false
             onPressed: (m) => {
                 win.activate()
+                if (!(win.st && win.st.renaming >= 0))
+                    win.takeFocus()
                 start = mapToItem(win.area, m.x, m.y)
                 from = win.box
                 dragging = !win.maximized
@@ -147,7 +264,7 @@ Item {
 
         TermStrip {
             x: 8; y: 5
-            width: Math.max(0, panelButton.x - DeskStyle.webGrabGap - x)
+            width: Math.max(0, pinBtn.x - DeskStyle.webGrabGap - x)
             tabs: naomiTerm.tabs
             active: naomiTerm.active
             renaming: win.st.renaming
@@ -160,15 +277,40 @@ Item {
         }
 
         WinButton {
+            id: pinBtn
+            visible: DeskStyle.tablet
+            x: DeskStyle.tablet ? splitLeftBtn.x - 2 - width : panelButton.x
+            y: (DeskStyle.webBarH - height) / 2
+            glyph: "pin"
+            active: win.pinned
+            onClicked: { win.pinned = !win.pinned; win.activate() }
+        }
+        WinButton {
+            id: splitLeftBtn
+            visible: DeskStyle.tablet
+            x: DeskStyle.tablet ? splitRightBtn.x - 2 - width : panelButton.x
+            y: (DeskStyle.webBarH - height) / 2
+            glyph: "split-left"
+            onClicked: win.snapHalf(false)
+        }
+        WinButton {
+            id: splitRightBtn
+            visible: DeskStyle.tablet
+            x: DeskStyle.tablet ? panelButton.x - 2 - width : panelButton.x
+            y: (DeskStyle.webBarH - height) / 2
+            glyph: "split-right"
+            onClicked: win.snapHalf(true)
+        }
+        WinButton {
             id: panelButton
-            x: win.width - 6 - 2 * 30 - 2; y: 5
+            x: win.width - 8 - 2 * width; y: (DeskStyle.webBarH - height) / 2
             glyph: "panel"
             unit: 0.9545
             line: 1.5
             onClicked: win.panelToggled()
         }
         WinButton {
-            x: win.width - 6 - 30; y: 5
+            x: win.width - 6 - width; y: (DeskStyle.webBarH - height) / 2
             glyph: "close"
             danger: true
             unit: 5.25 / 4.5

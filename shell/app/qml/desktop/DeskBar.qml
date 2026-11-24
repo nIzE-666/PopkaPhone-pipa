@@ -57,6 +57,8 @@ Item {
 
     readonly property real by: (DeskStyle.panelH - DeskStyle.appH) / 2
     readonly property real mid: DeskStyle.panelH / 2
+    readonly property bool compact: DeskStyle.tablet && width <= 900
+    readonly property int groupGap: compact ? 12 : DeskStyle.sepGap
 
     Rectangle {   // фон — сплошной (у НаомиОС — .92, N_BAR_ALPHA; на столе прозрачности нет — docs/DESKTOP.md)
         anchors.fill: parent
@@ -98,11 +100,15 @@ Item {
 
     // ---------- черта и FILE ----------
     readonly property real nInk: (DeskStyle.icon - DeskStyle.iconLine) * 5 / 6 + DeskStyle.iconLine
-    Sep { id: sepApps; x: DeskStyle.panelSide + (DeskStyle.appH + bar.nInk) / 2 + DeskStyle.sepGap }
+    Sep {
+        id: sepApps
+        x: bar.compact ? nItem.x + nItem.width + 4
+                       : DeskStyle.panelSide + (DeskStyle.appH + bar.nInk) / 2 + bar.groupGap
+    }
     TextMetrics { id: fileWidth; font: time.font; text: "FILE" }
     BarItem {
         id: fileItem
-        x: sepApps.x + DeskStyle.sepGap - DeskStyle.itemPad
+        x: sepApps.x + bar.groupGap - DeskStyle.itemPad
         y: bar.by
         width: Math.ceil(fileWidth.tightBoundingRect.width) + 2 * DeskStyle.itemPad
         onClicked: bar.filesClicked()
@@ -172,49 +178,71 @@ Item {
 
     // ---------- открытые приложения Android — за закреплёнными, как открытые программы у НаомиОС (bar_draw_apps):
     // подпись — имя заглавными (длинное — с многоточием, не шире 180), черта — как у FILE и WEB ----------
-    Row {
-        id: androidRow
+    Flickable {
+        id: appStrip
         x: bar.pinnedRight + DeskStyle.itemGap
         y: bar.by
-        spacing: DeskStyle.itemGap
-        Repeater {
-            model: bar.androidApps
-            delegate: BarItem {
-                id: appItem
-                required property var modelData
-                readonly property string label: modelData.name.toUpperCase()
-                TextMetrics { id: appWidth; font: time.font; text: appItem.label }
-                // как у FILE и WEB: по видимым буквам (межбуквенный интервал шрифт панели уже содержит); подпись —
-                // своей шириной, многоточие — только длинной (у FILE за краем последней буквы — ещё интервал)
-                readonly property bool tooLong: appWidth.tightBoundingRect.width > 180
-                width: Math.ceil(tooLong ? 180 : appWidth.tightBoundingRect.width) + 2 * DeskStyle.itemPad
-                onClicked: bar.androidClicked(modelData.pkg)
-                BarText {
-                    x: DeskStyle.itemPad - appWidth.tightBoundingRect.x
-                    y: -bar.by + appItem.dy
-                    width: appItem.tooLong ? 180 : implicitWidth
-                    elide: Text.ElideRight
-                    text: appItem.label
-                    color: appItem.hovered || appItem.modelData.open >= 1 ? DeskStyle.text : DeskStyle.muted
-                }
-                Rectangle {   // черта: окна на виду — ярко, все свёрнуты — вполсилы
-                    x: DeskStyle.itemPad
-                    y: DeskStyle.appH - 5 + appItem.dy
-                    width: parent.width - 2 * DeskStyle.itemPad
-                    height: 2
-                    color: DeskStyle.amberA(appItem.modelData.open)
+        width: DeskStyle.tablet ? Math.min(contentWidth, Math.max(0, bar.appsLimit - x)) : contentWidth
+        height: DeskStyle.appH
+        contentWidth: androidRow.width
+        contentHeight: height
+        flickableDirection: Flickable.HorizontalFlick
+        boundsBehavior: Flickable.StopAtBounds
+        clip: DeskStyle.tablet
+        interactive: DeskStyle.tablet && contentWidth > width
+        Row {
+            id: androidRow
+            spacing: DeskStyle.itemGap
+            Repeater {
+                model: bar.androidApps
+                delegate: BarItem {
+                    id: appItem
+                    required property var modelData
+                    readonly property string label: modelData.name.toUpperCase()
+                    TextMetrics { id: appWidth; font: time.font; text: appItem.label }
+                    // как у FILE и WEB: по видимым буквам (межбуквенный интервал шрифт панели уже содержит); подпись —
+                    // своей шириной, многоточие — только длинной (у FILE за краем последней буквы — ещё интервал)
+                    readonly property bool tooLong: appWidth.tightBoundingRect.width > 180
+                    width: Math.ceil(tooLong ? 180 : appWidth.tightBoundingRect.width) + 2 * DeskStyle.itemPad
+                    onClicked: bar.androidClicked(modelData.pkg)
+                    BarText {
+                        x: DeskStyle.itemPad - appWidth.tightBoundingRect.x
+                        y: -bar.by + appItem.dy
+                        width: appItem.tooLong ? 180 : implicitWidth
+                        elide: Text.ElideRight
+                        text: appItem.label
+                        color: appItem.hovered || appItem.modelData.open >= 1 ? DeskStyle.text : DeskStyle.muted
+                    }
+                    Rectangle {   // черта: окна на виду — ярко, все свёрнуты — вполсилы
+                        x: DeskStyle.itemPad
+                        y: DeskStyle.appH - 5 + appItem.dy
+                        width: parent.width - 2 * DeskStyle.itemPad
+                        height: 2
+                        color: DeskStyle.amberA(appItem.modelData.open)
+                    }
                 }
             }
         }
     }
-    readonly property real appsRight: bar.androidApps.length ? androidRow.x + androidRow.width : bar.pinnedRight
+    readonly property real appsRight: appStrip.width > 0 ? appStrip.x + appStrip.width : bar.pinnedRight
+    readonly property real appsLimit: {
+        if (bar.webPanel || bar.termPanel) {
+            const tabsLimit = bar.windowX - 2 - DeskStyle.webFieldMinW - 8 - bar.groupGap + DeskStyle.itemPad
+            if (tabsLimit >= bar.pinnedRight)
+                return tabsLimit
+        }
+        if (bar.webPanel || bar.termPanel || bar.androidPanelShown)
+            return bar.windowX - 12 - bar.groupGap + DeskStyle.itemPad
+        return net.x - DeskStyle.itemGap
+    }
 
     // ---------- на весь экран (bar_draw_web): у браузера в режиме панели — черта, вкладки и «+»; у окна Android «на весь
     // экран» (docs/ANDROID.md, «На весь экран») — без вкладок. Справа у обоих — «в окно» (обычный значок панели) и
     // крестик (своё, НаомиФона: у НаомиОС его нет — окно браузера там закрывали из окна), черта ----------
-    readonly property real webSep: bar.appsRight - DeskStyle.itemPad + DeskStyle.sepGap
-    readonly property real webSepRight: (net.visible ? net.cx - bar.routeHalf : sound.cx - bar.soundHalf) - DeskStyle.sepGap
-    readonly property real closeX: webSepRight - 42                       // крестик — где был «в окно»
+    readonly property real webSep: bar.appsRight - DeskStyle.itemPad + bar.groupGap
+    readonly property real webSepRight: (DeskStyle.tablet ? net.x : net.visible ? net.cx - bar.routeHalf
+                                                       : sound.cx - bar.soundHalf) - bar.groupGap
+    readonly property real closeX: webSepRight - (DeskStyle.tablet ? DeskStyle.appH + DeskStyle.itemGap : 42)
     readonly property real windowX: closeX - DeskStyle.appH - DeskStyle.itemGap
     readonly property real webTabsLeft: webSep + 8
     readonly property real webTabsRight: windowX - 2
@@ -222,9 +250,11 @@ Item {
     readonly property bool termTabsShown: bar.termPanel && bar.term !== null
                                           && webTabsRight - webTabsLeft >= DeskStyle.webFieldMinW
     property bool androidPanelShown: false   // верхнее на виду — окно Android «на весь экран» или игра «в доке»
-    readonly property bool androidButtons: bar.androidPanelShown && !bar.webTabsShown && !bar.termTabsShown
-                                           && windowX - 12 - DeskStyle.sepGap >= bar.appsRight - DeskStyle.itemPad
-    readonly property bool panelButtons: bar.webTabsShown || bar.termTabsShown || bar.androidButtons
+    readonly property bool webButtons: bar.webTabsShown || DeskStyle.tablet && bar.webPanel
+    readonly property bool termButtons: bar.termTabsShown || DeskStyle.tablet && bar.termPanel
+    readonly property bool androidButtons: bar.androidPanelShown && !bar.webButtons && !bar.termButtons
+                                           && windowX - 12 - bar.groupGap >= bar.appsRight - DeskStyle.itemPad
+    readonly property bool panelButtons: bar.webButtons || bar.termButtons || bar.androidButtons
     signal webCloseClicked(int modifiers)
     signal androidWindowClicked()
     signal androidCloseClicked(int modifiers)
@@ -262,8 +292,8 @@ Item {
         visible: bar.panelButtons
         x: bar.windowX; y: bar.by
         width: DeskStyle.appH
-        onClicked: bar.termTabsShown ? bar.termWindowClicked() : bar.webTabsShown ? bar.webWindowClicked()
-                                                                                 : bar.androidWindowClicked()
+        onClicked: bar.termButtons ? bar.termWindowClicked() : bar.webButtons ? bar.webWindowClicked()
+                                                                            : bar.androidWindowClicked()
         Glyph {
             x: parent.width / 2; y: DeskStyle.appH / 2 + windowItem.dy
             kind: "panel"
@@ -278,8 +308,8 @@ Item {
         danger: true
         x: bar.closeX; y: bar.by
         width: DeskStyle.appH
-        onClicked: (mods) => bar.termTabsShown ? bar.termCloseClicked(mods) : bar.webTabsShown ? bar.webCloseClicked(mods)
-                                                                                    : bar.androidCloseClicked(mods)
+        onClicked: (mods) => bar.termButtons ? bar.termCloseClicked(mods) : bar.webButtons ? bar.webCloseClicked(mods)
+                                                                                         : bar.androidCloseClicked(mods)
         Glyph {
             x: parent.width / 2; y: DeskStyle.appH / 2 + closeItem.dy
             kind: "close"
@@ -291,18 +321,36 @@ Item {
     Sep { visible: bar.panelButtons; x: Math.round(bar.webSepRight) }
 
     // ---------- справа: время, дата ----------
+    property bool clock24h: true
+    property bool clockSeconds: false
+    property int dateFormat: 1          // 0 — скрыть, 1 — ВТ 24 НОЯ, 2 — 24.11, 3 — TUE 24
     property date now: new Date()
-    Timer {   // минута сменилась — новое время (до начала следующей минуты; новый интервал — со сменой now)
+    Timer {   // минута (или секунда, если включены секунды) сменилась — новое время
         running: true
-        repeat: true   // без него часы вставали через минуту после первого показа стола (17 ноября 2026)
-        interval: (60 - bar.now.getSeconds()) * 1000 + 50
+        repeat: true
+        interval: bar.clockSeconds ? 1000 : (60 - bar.now.getSeconds()) * 1000 + 50
         onTriggered: bar.now = new Date()
     }
     readonly property string timeText: {
-        const h = now.getHours(), m = now.getMinutes()
-        return (h % 12 === 0 ? 12 : h % 12) + ":" + (m < 10 ? "0" : "") + m + (h < 12 ? " AM" : " PM")
+        const h = now.getHours(), m = now.getMinutes(), s = now.getSeconds()
+        const mm = (m < 10 ? "0" : "") + m
+        const ss = bar.clockSeconds ? ":" + (s < 10 ? "0" : "") + s : ""
+        if (bar.clock24h)
+            return (h < 10 ? "0" : "") + h + ":" + mm + ss
+        return (h % 12 === 0 ? 12 : h % 12) + ":" + mm + ss + (h < 12 ? " AM" : " PM")
     }
-    readonly property string dateText: ["SUN", "MON", "TUE", "WED", "THU", "FRI", "SAT"][now.getDay()] + " " + now.getDate()
+    readonly property string dateText: {
+        if (bar.dateFormat === 0)
+            return ""
+        const d = now.getDate(), mo = now.getMonth()
+        if (bar.dateFormat === 2)
+            return (d < 10 ? "0" : "") + d + "." + (mo + 1 < 10 ? "0" : "") + (mo + 1)
+        if (bar.dateFormat === 3)
+            return ["SUN", "MON", "TUE", "WED", "THU", "FRI", "SAT"][now.getDay()] + " " + d
+        const days = ["ВС", "ПН", "ВТ", "СР", "ЧТ", "ПТ", "СБ"]
+        const mons = ["ЯНВ", "ФЕВ", "МАР", "АПР", "МАЙ", "ИЮН", "ИЮЛ", "АВГ", "СЕН", "ОКТ", "НОЯ", "ДЕК"]
+        return days[now.getDay()] + " " + d + " " + mons[mo]
+    }
 
     BarText {
         id: time
@@ -312,28 +360,124 @@ Item {
     }
     BarText {
         id: date
+        visible: !bar.compact && bar.dateFormat !== 0
         x: time.x - 12 - implicitWidth
         text: bar.dateText
         color: DeskStyle.muted
     }
-    Sep { id: sepClock; x: date.x - DeskStyle.sepGap }
+    Sep { id: sepClock; x: (date.visible ? date.x : time.x) - bar.groupGap }
 
-    // ---------- раскладка: какая у зрителя (сочетание клавиш у приставки меняет и её); щелчок — попросить другую,
-    // подпись сменится, когда зритель ответит. Зритель её не сообщает (окно Mac: раскладка — у самого Mac) — «EN»,
-    // щелчок ничего не делает. Шрифт моноширинный: EN и RU одной ширины, смена значки не двигает ----------
-    readonly property string layout: naomiStream.layout
+    // ---------- раскладка: зрителя (сочетание клавиш у приставки меняет и её), клавиатуры устройства (HardKeyboard)
+    // или на планшете — экранной клавиатуры (naomiKeyboard.layout); щелчок — сменить. Шрифт моноширинный: EN и RU
+    // одной ширины, смена значки не двигает ----------
+    readonly property string layout: naomiStream.layout !== "" ? naomiStream.layout
+                                   : DeskStyle.tablet && naomiKeyboard !== null ? naomiKeyboard.layout : ""
+    signal keyboardClicked()
+    signal screenshotClicked()
+    property bool clipOpen: false
+    signal clipClicked()
+    readonly property real clipRight: clipBtn.x + clipBtn.width
     TextMetrics { id: langWidth; font: time.font; text: "EN" }
     BarItem {
         id: lang
-        width: Math.ceil(langWidth.advanceWidth) + 2 * DeskStyle.barTextPad
-        x: sepClock.x - (DeskStyle.sepGap - DeskStyle.barTextPad) - width
+        width: Math.max(DeskStyle.tablet ? DeskStyle.appH : 0,
+                        Math.ceil(langWidth.advanceWidth) + 2 * DeskStyle.barTextPad)
+        x: sepClock.x - (bar.groupGap - DeskStyle.barTextPad) - width
         y: bar.by
-        onClicked: if (bar.layout !== "") naomiStream.setLayout(bar.layout === "RU" ? "EN" : "RU")
+        onClicked: {
+            if (bar.layout === "")
+                return
+            const next = bar.layout === "RU" ? "EN" : "RU"
+            if (naomiStream.layout !== "")
+                naomiStream.setLayout(next)
+            if (DeskStyle.tablet && naomiKeyboard !== null)
+                naomiKeyboard.setLayout(next)
+        }
         BarText {
             anchors.horizontalCenter: parent.horizontalCenter
             y: -bar.by + lang.dy
             text: bar.layout !== "" ? bar.layout : "EN"
             color: lang.hovered ? DeskStyle.text : DeskStyle.muted
+        }
+    }
+    BarItem {
+        id: keyboard
+        visible: DeskStyle.tablet
+        width: DeskStyle.appH
+        x: lang.x - width
+        y: bar.by
+        open: DeskStyle.tablet && naomiKeyboard !== null && naomiKeyboard.visible
+        Accessible.role: Accessible.Button
+        Accessible.name: "Экранная клавиатура"
+        function toggle() { bar.keyboardClicked() }
+        Accessible.onPressAction: toggle()
+        onClicked: toggle()
+        Text {
+            anchors.centerIn: parent
+            font.family: "Material Symbols Rounded"
+            font.pixelSize: 22
+            color: keyboard.open ? DeskStyle.amber
+                 : (typeof naomiSystemTools !== "undefined" && naomiSystemTools && naomiSystemTools.hardwareKeyboard) ? DeskStyle.teal
+                 : DeskStyle.muted
+            text: "keyboard"
+        }
+    }
+    BarItem {
+        id: rotate
+        visible: DeskStyle.tablet
+        width: DeskStyle.appH
+        x: keyboard.x - width
+        y: bar.by
+        Accessible.role: Accessible.Button
+        Accessible.name: "Повернуть экран (долгое нажатие — автоповорот)"
+        Accessible.onPressAction: naomiDisplay.toggleOrientation()
+        onClicked: naomiDisplay.toggleOrientation()
+        onLongPressed: {
+            if (typeof naomiHaptics !== "undefined" && naomiHaptics)
+                naomiHaptics.tap(14)
+            naomiDisplay.autoRotate = !naomiDisplay.autoRotate
+        }
+        Text {
+            anchors.centerIn: parent
+            font.family: "Material Symbols Rounded"
+            font.pixelSize: 22
+            color: rotate.hovered || naomiDisplay.autoRotate ? DeskStyle.amber : DeskStyle.muted
+            text: naomiDisplay.autoRotate ? "screen_rotation" : "screen_lock_rotation"
+        }
+    }
+    BarItem {
+        id: shotBtn
+        visible: DeskStyle.tablet
+        width: DeskStyle.appH
+        x: rotate.x - width
+        y: bar.by
+        Accessible.role: Accessible.Button
+        Accessible.name: "Скриншот экрана"
+        Accessible.onPressAction: bar.screenshotClicked()
+        onClicked: bar.screenshotClicked()
+        Glyph {
+            kind: "camera"
+            x: parent.width / 2
+            y: DeskStyle.appH / 2 + shotBtn.dy
+            color: shotBtn.hovered ? DeskStyle.amber : DeskStyle.muted
+        }
+    }
+    BarItem {
+        id: clipBtn
+        visible: DeskStyle.tablet
+        width: DeskStyle.appH
+        x: shotBtn.x - width
+        y: bar.by
+        open: bar.clipOpen
+        Accessible.role: Accessible.Button
+        Accessible.name: "Буфер обмена"
+        Accessible.onPressAction: bar.clipClicked()
+        onClicked: bar.clipClicked()
+        Glyph {
+            kind: "clipboard"
+            x: parent.width / 2
+            y: DeskStyle.appH / 2 + clipBtn.dy
+            color: clipBtn.hovered || bar.clipOpen ? DeskStyle.amber : DeskStyle.muted
         }
     }
 
@@ -348,7 +492,7 @@ Item {
         id: batteryItem
         visible: bar.batteryShown
         width: batteryIcon.width + 2 * DeskStyle.barTextPad
-        x: lang.x + DeskStyle.barTextPad - DeskStyle.sepGap + DeskStyle.barTextPad - width
+        x: DeskStyle.tablet ? clipBtn.x - width : lang.x + 2 * DeskStyle.barTextPad - DeskStyle.sepGap - width
         y: bar.by
         open: bar.batteryOpen
         onClicked: bar.batteryClicked()
@@ -371,9 +515,10 @@ Item {
     readonly property real inetHalf: Math.max(9.8 * Math.SQRT1_2, 7) + DeskStyle.iconLine / 2
     BarItem {
         id: inetItem
-        readonly property real cx: (bar.batteryShown ? batteryItem.x + DeskStyle.barTextPad : lang.x + DeskStyle.barTextPad)
+        readonly property real cx: (bar.batteryShown ? batteryItem.x : lang.x) + DeskStyle.barTextPad
                                    - DeskStyle.sepGap - bar.inetHalf
-        x: cx - width / 2; y: bar.by
+        x: DeskStyle.tablet ? (bar.batteryShown ? batteryItem.x : clipBtn.x) - width : cx - width / 2
+        y: bar.by
         width: DeskStyle.appH
         open: bar.inetOpen
         onClicked: bar.inetClicked()
@@ -409,7 +554,8 @@ Item {
     BarItem {
         id: bt
         readonly property real cx: inetItem.cx - bar.inetHalf - DeskStyle.sepGap - bar.btHalf
-        x: cx - width / 2; y: bar.by
+        x: DeskStyle.tablet ? inetItem.x - width : cx - width / 2
+        y: bar.by
         width: DeskStyle.appH
         open: bar.btOpen
         onClicked: bar.btClicked()
@@ -433,7 +579,8 @@ Item {
     BarItem {
         id: sound
         readonly property real cx: bt.cx - bar.btHalf - DeskStyle.sepGap - bar.soundHalf
-        x: cx - width / 2; y: bar.by
+        x: DeskStyle.tablet ? bt.x - width : cx - width / 2
+        y: bar.by
         width: DeskStyle.appH
         open: bar.soundOpen
         onClicked: bar.soundClicked()
@@ -460,14 +607,15 @@ Item {
     readonly property real routeHalf: 8.625 + DeskStyle.iconLine / 2   // правая сторона экрана — 8,625 от середины
     BarItem {
         id: net
-        visible: bar.route !== ""
+        visible: DeskStyle.tablet || bar.route !== ""
         readonly property real cx: sound.cx - bar.soundHalf - DeskStyle.sepGap - bar.routeHalf
-        x: cx - width / 2; y: bar.by
+        x: DeskStyle.tablet ? sound.x - width : cx - width / 2
+        y: bar.by
         width: DeskStyle.appH
         open: bar.monitorOpen
         onClicked: bar.netClicked()
         Glyph {
-            kind: bar.route === "wifi" ? "route-wifi" : "route-cable"
+            kind: DeskStyle.tablet ? "monitor" : bar.route === "wifi" ? "route-wifi" : "route-cable"
             x: parent.width / 2
             y: DeskStyle.appH / 2 + net.dy
             color: net.hovered || bar.monitorOpen ? DeskStyle.text : DeskStyle.muted

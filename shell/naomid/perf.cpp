@@ -1,5 +1,6 @@
 #include "perf.h"
 
+#include "device_profile.h"
 #include "gpu.h"
 
 #include <QDBusConnectionInterface>
@@ -15,10 +16,6 @@ Q_LOGGING_CATEGORY(lcPerf, "naomid.perf")
 
 namespace {
 
-// Пол частоты по группам ядер SM7250 (кГц): малые A55 (policy0), большое A76 (policy6), главное A76 (policy7) —
-// ступени из scaling_available_frequencies, около 3/4 наибольшей. Замер 17 ноября 2026 (docs/DESKTOP.md)
-const struct { const char *policy; const char *floor; } kFloors[] = {
-    {"policy0", "1363200"}, {"policy6", "1478400"}, {"policy7", "1766400"}};
 const char kCpufreq[] = "/sys/devices/system/cpu/cpufreq/";
 // группа планировщика оболочки: schedtune подключает shell-prepare (/dev/stune)
 const char kStune[] = "/dev/stune";
@@ -70,6 +67,8 @@ Perf::Perf(Gpu *gpu, QObject *parent)
     , m_gpu(gpu)
 {
     set("Desk", false);
+    if (!DeviceProfile::current().pixel)
+        return;
     m_watch.setConnection(bus());
     m_watch.setWatchMode(QDBusServiceWatcher::WatchForUnregistration);
     connect(&m_watch, &QDBusServiceWatcher::serviceUnregistered, this, [this](const QString &who) {
@@ -88,7 +87,7 @@ Perf::Perf(Gpu *gpu, QObject *parent)
 
 void Perf::HoldDesk(bool on)
 {
-    if (!calledFromDBus())
+    if (!DeviceProfile::current().pixel || !calledFromDBus())
         return;
     const QString who = message().service();
     if (on) {
@@ -122,11 +121,11 @@ void Perf::apply()
 
 void Perf::floors(bool on)
 {
-    for (const auto &f : kFloors) {
-        const QString dir = QLatin1String(kCpufreq) + QLatin1String(f.policy);
+    for (const auto &cluster : DeviceProfile::current().clusters) {
+        const QString dir = QLatin1String(kCpufreq) + QStringLiteral("policy%1").arg(cluster.firstCpu);
         if (!QDir(dir).exists())
             continue;
-        const QByteArray value = on ? QByteArray(f.floor) : read(dir + "/cpuinfo_min_freq");
+        const QByteArray value = on ? QByteArray::number(cluster.deskFloorKHz) : read(dir + "/cpuinfo_min_freq");
         if (!value.isEmpty())
             write(dir + "/scaling_min_freq", value);
     }

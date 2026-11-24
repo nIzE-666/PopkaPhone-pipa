@@ -18,4 +18,4 @@ add_executable(naomid main.cpp
     ${CMAKE_SOURCE_DIR}/app/dbus_plain.cpp ${CMAKE_SOURCE_DIR}/app/dbus_plain.h
     ${CMAKE_SOURCE_DIR}/app/unix_signals.cpp ${CMAKE_SOURCE_DIR}/app/unix_signals.h)
 target_include_directories(naomid PRIVATE ${CMAKE_SOURCE_DIR}/app)
-target_link_libraries(naomid PRIVATE Qt6::Core Qt6::DBus)
+target_link_libraries(naomid PRIVATE naomi-device Qt6::DBus)

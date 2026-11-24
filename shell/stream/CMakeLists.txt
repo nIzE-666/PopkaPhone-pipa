@@ -5,7 +5,7 @@ add_library(naomi-stream STATIC
     nv12_pack.cpp nv12_pack.h
     venus_encoder.cpp venus_encoder.h)
 target_include_directories(naomi-stream PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
-target_link_libraries(naomi-stream PUBLIC PkgConfig::GLES)
+target_link_libraries(naomi-stream PUBLIC PkgConfig::GLES PRIVATE naomi-device)
 
 add_executable(naomi-venc-bench venc_bench.cpp)
 target_link_libraries(naomi-venc-bench PRIVATE naomi-stream)

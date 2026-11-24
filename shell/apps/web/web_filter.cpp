@@ -1,8 +1,10 @@
 #include "web_filter.h"
+#include "google_auth.h"
 
 #include <QDateTime>
 #include <QElapsedTimer>
 #include <QFile>
+#include <QThread>
 #include <QUrl>
 
 // Профиль страниц в QML — QQuickWebEngineProfile; его заголовка в среде сборки нет (как и всего пакета -dev,
@@ -63,17 +65,39 @@ QString siteOf(const QUrl &url)
 WebFilter::WebFilter(const QString &path, QObject *parent)
     : QWebEngineUrlRequestInterceptor(parent)
 {
-    QElapsedTimer t;
-    t.start();
-    if (load(path))
-        qInfo("web: реклама и слежка — %lld доменов, исключений %lld (%lld мс)", qlonglong(m_block.size()),
-              qlonglong(m_allow.size() + m_sites.size()), qlonglong(t.elapsed()));
-    else
-        qInfo("web: реклама и слежка — списка нет (%s, tools/naomi web-filters), не блокируется ничего",
-              qPrintable(path));
+    // Читали прямо здесь, до движка QML: запуск браузера стоял 70–116 мс (журнал 23 ноября 2026). Теперь — в своём
+    // потоке, а готовые списки отдаются потоку интерфейса: в Qt 6 interceptRequest зовётся в нём же — без замков
+    m_loader = QThread::create([this, path] {
+        QElapsedTimer t;
+        t.start();
+        auto *lists = new Lists;
+        const bool ok = load(path, *lists);
+        const qint64 ms = t.elapsed();
+        QMetaObject::invokeMethod(this, [this, lists, ok, ms, path] {
+            m_block = std::move(lists->block);
+            m_allow = std::move(lists->allow);
+            m_sites = std::move(lists->sites);
+            delete lists;
+            if (ok)
+                qInfo("web: реклама и слежка — %lld доменов, исключений %lld (%lld мс, в фоне)",
+                      qlonglong(m_block.size()), qlonglong(m_allow.size() + m_sites.size()), qlonglong(ms));
+            else
+                qInfo("web: реклама и слежка — списка нет (%s, tools/naomi web-filters), не блокируется ничего",
+                      qPrintable(path));
+        }, Qt::QueuedConnection);
+    });
+    m_loader->start(QThread::LowPriority);
 }
 
-bool WebFilter::load(const QString &path)
+WebFilter::~WebFilter()
+{
+    if (m_loader) {
+        m_loader->wait();
+        delete m_loader;
+    }
+}
+
+bool WebFilter::load(const QString &path, Lists &out)
 {
     QFile f(path);
     if (!f.open(QIODevice::ReadOnly | QIODevice::Text))
@@ -84,7 +108,7 @@ bool WebFilter::load(const QString &path)
         if (w.size() < 2 || line.startsWith('#'))
             continue;
         if (w[0] == "s") {
-            m_sites.insert(w[1]);
+            out.sites.insert(w[1]);
             continue;
         }
         Rule r;
@@ -97,12 +121,23 @@ bool WebFilter::load(const QString &path)
             else if (w[i].startsWith("on="))
                 r.on = w[i].mid(3).split(',');
         }
-        (w[0] == "a" ? m_allow : m_block).insert(w[1], r);
+        (w[0] == "a" ? out.allow : out.block).insert(w[1], r);
     }
     return true;
 }
 
-const WebFilter::Rule *WebFilter::find(const QHash<QString, Rule> &rules, const QString &host) const
+bool WebFilter::hasDomain(const QSet<QString> &domains, const QString &host)
+{
+    for (qsizetype at = 0; at >= 0;) {
+        if (domains.contains(host.mid(at)))
+            return true;
+        at = host.indexOf('.', at);
+        at = at < 0 ? -1 : at + 1;
+    }
+    return false;
+}
+
+const WebFilter::Rule *WebFilter::find(const QHash<QString, Rule> &rules, const QString &host)
 {
     for (qsizetype at = 0; at >= 0;) {
         const auto it = rules.constFind(host.mid(at));
@@ -116,18 +151,27 @@ const WebFilter::Rule *WebFilter::find(const QHash<QString, Rule> &rules, const 
 
 void WebFilter::interceptRequest(QWebEngineUrlRequestInfo &info)
 {
+    const QUrl url = info.requestUrl();
+    const QString host = url.host().toLower();
+    const QUrl page = info.firstPartyUrl();
+    const QString pageHost = page.host().toLower();
+    const std::string hostStd = host.toStdString();
+    const std::string pageStd = pageHost.toStdString();
+    if (naomi::web::shouldOverrideAuthHeaders(hostStd, pageStd)) {
+        info.setHttpHeader("User-Agent", QByteArray(naomi::web::kGoogleAuthUserAgent));
+        for (const char *hdr : naomi::web::kClientHintHeaders)
+            info.setHttpHeader(QByteArray(hdr), QByteArray());
+    }
+    if (naomi::web::shouldBypassBlockForGoogleAuth(hostStd, pageStd))
+        return;
     // страница, на которую идут, — всегда (сам пользователь набрал или щёлкнул); блокируется то, что она тянет
     if (info.resourceType() == QWebEngineUrlRequestInfo::ResourceTypeMainFrame || m_block.isEmpty())
         return;
-    const QUrl url = info.requestUrl();
-    const QString host = url.host().toLower();
-    if (host.isEmpty() || !find(m_block, host))
+    const Rule *b = host.isEmpty() ? nullptr : find(m_block, host);
+    if (!b)
         return;
-    const QUrl page = info.firstPartyUrl();
-    const QString pageHost = page.host().toLower();
-    for (const QString &s : m_sites)   // сайт целиком без блокировки — их единицы
-        if (pageHost == s || pageHost.endsWith('.' + s))
-            return;
+    if (hasDomain(m_sites, pageHost))   // сайт целиком без блокировки (страница или её родительский домен)
+        return;
     const quint32 type = typeOf(info.resourceType());
     if (const Rule *a = find(m_allow, host)) {
         bool here = a->on.isEmpty();
@@ -136,7 +180,6 @@ void WebFilter::interceptRequest(QWebEngineUrlRequestInfo &info)
         if (here && (!a->types || (a->types & type)))
             return;
     }
-    const Rule *b = find(m_block, host);
     if (b->types && !(b->types & type))
         return;
     if (b->thirdParty && (page.isEmpty() || siteOf(url) == siteOf(page)))

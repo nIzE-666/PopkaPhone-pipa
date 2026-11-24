@@ -38,8 +38,8 @@ Item {
         }
         Image {
             anchors.fill: parent
-            visible: naomiFiles.wallpaper !== ""
-            source: naomiFiles.wallpaper !== "" ? "file://" + naomiFiles.wallpaper + "?" + naomiFiles.wallpaperVersion : ""
+            visible: status === Image.Ready
+            source: naomiFiles.desktopWallpaper
             fillMode: Image.PreserveAspectCrop
             sourceSize.width: 640
             asynchronous: true

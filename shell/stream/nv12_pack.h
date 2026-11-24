@@ -21,7 +21,7 @@ class Nv12Packer
 {
 public:
     // w × h — кадр потока; nvStride (байт), yScan, size — раскладка NV12 кодера; pitch — строка буфера-цели, пикселей RGBA
-    bool init(int w, int h, int nvStride, int yScan, size_t size, int pitch);
+    bool init(int w, int h, int nvStride, int yScan, size_t size, int pitch, int rotation = 0);
     // src — текстура RGBA любого размера (растягивается под кадр); flipY — у src первая строка внизу
     // (кадр окна GL); dstFbo — кадровый буфер цели
     void pack(GLuint src, bool flipY, GLuint dstFbo);

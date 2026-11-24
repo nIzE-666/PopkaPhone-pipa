@@ -5,6 +5,7 @@
 // Ширина — 1280 точек (кадр 1920), высота — под окно на Mac, от 720 до 960 («Форма стола»); мышь и клавиатура — с Mac.
 import QtQuick
 import QtCore
+import Naomi.Ui as Ui
 import "android"
 import "files"
 import "game"
@@ -17,20 +18,114 @@ Item {
     id: desk
     width: 1280
     height: 720
+    x: DeskStyle.tablet && parent ? (parent.width - width) / 2 : 0
+    y: DeskStyle.tablet && parent ? (parent.height - height) / 2 : 0
+    rotation: DeskStyle.tablet ? naomiDisplay.sceneRotation : 0
+    transformOrigin: Item.Center
+
+    readonly property bool watchOrientation: DeskStyle.tablet && naomiPhone.available
+                                             && naomiPower.displayOn && naomiDisplay.autoRotate
+    onWatchOrientationChanged: {
+        if (DeskStyle.tablet && naomiPhone.available)
+            naomiPhone.sensors.call("Watch", [watchOrientation ? ["orientation"] : []])
+    }
+    readonly property int sensedRotation: {
+        if (!watchOrientation)
+            return -1
+        switch (naomiPhone.sensors.orientation) {
+        case "top-up": return 0
+        case "right-up": return 90
+        case "bottom-up": return 180
+        case "left-up": return 270
+        default: return -1
+        }
+    }
+    onSensedRotationChanged: {
+        // Датчик отсекает диагонали и плоские положения; ждём устойчивого положения.
+        if (sensedRotation < 0 || sensedRotation === rotation)
+            rotateDelay.stop()
+        else
+            rotateDelay.restart()
+    }
+    Timer {
+        id: rotateDelay
+        interval: 450
+        onTriggered: naomiDisplay.sceneRotation = desk.sensedRotation
+    }
+
+    property bool keyboardBuilt: false
+    Connections {
+        target: DeskStyle.tablet ? naomiKeyboard : null
+        function onVisibleChanged() {
+            if (naomiKeyboard && naomiKeyboard.visible)
+                desk.keyboardBuilt = true
+        }
+    }
+    function isDescendant(item, ancestor) {
+        for (let p = item; p; p = p.parent)
+            if (p === ancestor)
+                return true
+        return false
+    }
+    function ensureWindowFocus() {
+        if (naomiKeyboard && naomiKeyboard.inputEnabled)
+            return
+        const active = windows.children.find(w => w.active && !w.minimized && !w.closing && !w.parked)
+        if (!active || typeof active.takeFocus !== "function")
+            return
+        const focused = desk.Window.activeFocusItem
+        if (focused && isDescendant(focused, active))
+            return
+        if (active === webWindow && web.focused)
+            return
+        if (active === termWindow && term.renaming >= 0)
+            return
+        active.takeFocus()
+    }
+    function toggleKeyboard() {
+        if (!naomiKeyboard)
+            return
+        if (naomiKeyboard.visible) {
+            Qt.inputMethod.hide()
+            return
+        }
+        ensureWindowFocus()
+        naomiKeyboard.showManual()
+    }
+    Loader {
+        id: keyboardLoader
+        active: DeskStyle.tablet && desk.keyboardBuilt
+        z: 3000
+        anchors.top: parent.top
+        anchors.bottom: parent.bottom
+        anchors.horizontalCenter: parent.horizontalCenter
+        width: Math.min(900, parent.width)
+        sourceComponent: Item {
+            Ui.KeyboardPanel {
+                tablet: true
+                visible: naomiPower.displayOn && visibleHeight > 0
+                readonly property rect windowRect: desk.rotation >= 0 && visible
+                                                   ? parent.mapToItem(null, Qt.rect(x, y, width, visibleHeight))
+                                                   : Qt.rect(0, 0, 0, 0)
+                onWindowRectChanged: if (naomiKeyboard)
+                    naomiKeyboard.setRect(windowRect.x, windowRect.y, windowRect.width, windowRect.height)
+            }
+        }
+    }
 
     // обои: ~/.config/naomi/desktop/wallpaper.jpg — копия выбранной в «Настройках» → «Обои» («Сделать фоном» в «Файлах»,
     // tools/naomi desktop-wallpaper); «Тёмные» — без картинки, этот градиент
     Rectangle {
         anchors.fill: parent
         gradient: Gradient {
-            GradientStop { position: 0; color: "#1b1424" }
-            GradientStop { position: 1; color: "#08070b" }
+            GradientStop { position: 0; color: DeskStyle.tablet ? DeskStyle.surface : "#1b1424" }
+            GradientStop { position: 1; color: DeskStyle.tablet ? DeskStyle.bg : "#08070b" }
         }
     }
     Image {
         anchors.fill: parent
-        visible: naomiFiles.wallpaper !== ""
-        source: deskWallpaper + (naomiFiles.wallpaperVersion ? "?" + naomiFiles.wallpaperVersion : "")
+        visible: status === Image.Ready
+        source: naomiFiles.desktopWallpaper
         fillMode: Image.PreserveAspectCrop   // как в bcdesk: вписать с обрезкой
         sourceSize.width: width * naomiDesk.scale
         asynchronous: true
@@ -61,11 +156,37 @@ Item {
             desk.btOpen = false
             desk.inetOpen = false
             desk.batteryOpen = false
+            desk.clipOpen = false
             volumeOsd.hideNow()
         }
     }
 
     // ---------- окна ----------
+    function fitWindowBox(box) {
+        const w = Math.min(box.width, windows.width), h = Math.min(box.height, windows.height)
+        return Qt.rect(Math.max(0, Math.min(box.x, windows.width - w)),
+                       Math.max(0, Math.min(box.y, windows.height - h)), w, h)
+    }
+    function fitOpenWindows() {
+        for (const w of windows.children) {
+            if (w.android || w.parked || w.closing)
+                continue
+            if (w === webWindow || w === termWindow || w.game) {
+                w.box = fitWindowBox(w.box)
+                continue
+            }
+            if (w.maximized)
+                w.normal = fitWindowBox(w.normal)
+            const box = w.maximized ? Qt.rect(0, 0, windows.width, windows.height)
+                                    : fitWindowBox(Qt.rect(w.x, w.y, w.width, w.height))
+            w.x = box.x
+            w.y = box.y
+            if (w !== settingsWindow && w !== padKeysWindow) {
+                w.width = box.width
+                w.height = box.height
+            }
+        }
+    }
     Item {
         id: windows
         z: naomiWeb.fullscreen && desk.webShown ? 1010 : 0   // видео на весь экран — поверх панели
@@ -75,9 +196,14 @@ Item {
         opacity: desk.chromeIn
         scale: 0.96 + 0.04 * desk.chromeIn
         transformOrigin: Item.Top
+        onWidthChanged: if (DeskStyle.tablet) Qt.callLater(desk.fitOpenWindows)
         // стол сменил высоту (форма окна на Mac, docs/DESKTOP.md): развёрнутые — во всю новую высоту, остальные — не
         // ниже края (браузер в режиме панели и развёрнутый подстраивается сам)
         onHeightChanged: {
+            if (DeskStyle.tablet) {
+                Qt.callLater(desk.fitOpenWindows)
+                return
+            }
             for (const w of children) {
                 if (w.android) {
                     continue   // окно Android — на всю область само, экран Android — вслед (androidSize)
@@ -98,6 +224,7 @@ Item {
         }
     }
     property int topZ: 0
+    property int pinZ: 50000
     readonly property var filesWindows: {
         windowsTick   // пересчёт, когда окна пришли, ушли, свернулись
         return windows.children.filter(w => !w.closing && !w.parked && !w.android && w !== webWindow && w !== settingsWindow
@@ -263,7 +390,7 @@ Item {
         for (const o of windows.children)
             o.active = o === w
         w.minimized = false
-        w.z = ++topZ
+        w.z = w.pinned ? ++pinZ : ++topZ
     }
     // FILE на панели и плитка FILES — как в НаомиОС: окон нет — открыть; на виду и в фокусе — свернуть все;
     // иначе — показать все, последнее сверху
@@ -374,6 +501,17 @@ Item {
         property bool wakeMove: false   // без дока: движение мыши будит монитор
         property string monitor: ""     // монитор приставки (JSON сообщения Monitor) — последний, что она называла
         property int exitAfter: 0       // стол без дела (мышь, клавиши, звук) столько, с, — уходит, как «закрыть сессию»
+        property int touchScrollSpeed: 35   // скорость прокрутки пальцем в приложениях Linux на планшете, %
+    }
+    Settings {
+        id: uiSettings
+        location: StandardPaths.writableLocation(StandardPaths.ConfigLocation) + "/naomi/desktop/interface.conf"
+        category: "interface"
+        property bool clock24h: true        // 24-часовой формат времени по умолчанию
+        property bool clockSeconds: false   // секунды в часах панели
+        property int dateFormat: 1          // 0 — скрыть, 1 — ВТ 24 НОЯ, 2 — 24.11, 3 — TUE 24
+        property real nightFilter: 0.0      // тёплый ночной фильтр экрана (0..0.60)
+        property int extraKeysMode: 0       // 0 — авто по физ. клавиатуре, 1 — всегда, 2 — скрыть
     }
     Binding {
         target: naomiStream
@@ -415,7 +553,8 @@ Item {
             return
         }
         const w = settingsWindowComponent.createObject(windows, {
-            cfg: mouseSettings, screen: screenSettings, pad: padSettings, touch: touchSettings, desk: desk, area: windows,
+            cfg: mouseSettings, screen: screenSettings, pad: padSettings, touch: touchSettings,
+            ui: uiSettings, term: termSettings, desk: desk, area: windows,
             y: 24 })
         w.x = Math.round((windows.width - w.width) / 2)   // ширина — по панели слева (её тянут, SettingsWindow)
         w.activated.connect(() => raise(w))
@@ -525,8 +664,16 @@ Item {
                 desk.winArrived(toplevel, xdgSurface)
                 return
             }
-            if (app === "claude") { // окно Claude (Electron, docs/CLAUDE.md)
-                desk.claudeArrived(toplevel, xdgSurface)
+            if (app === "claude" || app === "telegram" || app === "deepseek") {
+                if ((app === "telegram" && desk.telegramPid > 0 && !desk.telegramWindows.length
+                     || app === "deepseek" && desk.deepseekPid > 0 && !desk.deepseekWindows.length)
+                    && !nmenu.forceOpen)
+                    bar.menuOpen = false
+                desk.linuxArrived(toplevel, xdgSurface, app)
+                return
+            }
+            if (DeskStyle.tablet && app !== "web") {
+                desk.linuxArrived(toplevel, xdgSurface, "linux")
                 return
             }
             const w = webWindowComponent.createObject(windows, {
@@ -573,6 +720,20 @@ Item {
                 desk.claudePid = -1
                 return
             }
+            if (pid === desk.telegramPid) {
+                desk.telegramPid = -1
+                if (code === 127)
+                    nmenu.telegramError = "Telegram Desktop не установлен"
+                else if (code !== 0 && !desk.telegramWindows.length)
+                    nmenu.telegramError = "Не удалось запустить Telegram Desktop"
+                return
+            }
+            if (pid === desk.deepseekPid) {
+                desk.deepseekPid = -1
+                if (code !== 0 && !desk.deepseekWindows.length)
+                    nmenu.deepseekError = "Не удалось запустить DeepSeek"
+                return
+            }
             if (pid !== desk.webPid)
                 return
             desk.webPid = -1
@@ -612,6 +773,7 @@ Item {
         property bool panel: false
         property bool maximized: false
         property rect window: Qt.rect(0, 0, 0, 0)
+        property int fontSize: 15
     }
     // рамка по умолчанию — по центру свободной области, 960 × 600 (не больше её)
     function termBox() {
@@ -641,11 +803,23 @@ Item {
         raise(termWindow)
         termWindow.takeFocus()
     }
+    function openTerminalAt(dir) {
+        if (!termWindow || termWindow.closing)
+            openTerm()
+        else {
+            raise(termWindow)
+            termWindow.takeFocus()
+        }
+        naomiTerm.newTab(-1, dir || "~")
+    }
     function openTerm() {
         naomiTerm.start()
         const w = termWindowComponent.createObject(windows, {
             st: term, area: windows, box: desk.termBox(), maximized: termSettings.maximized,
+            fontSize: Qt.binding(() => termSettings.fontSize),
+            extraKeysMode: Qt.binding(() => uiSettings.extraKeysMode),
             panelMode: Qt.binding(() => termSettings.panel) })
+        w.fontSizePicked.connect((sz) => { termSettings.fontSize = sz })
         w.activated.connect(() => raise(w))
         w.closed.connect(() => {
             w.destroy()
@@ -748,7 +922,10 @@ Item {
         return gamePid < 0 ? 0 : !gameWindow || gameWindow.minimized ? 0.5 : 1
     }
     readonly property var gamePanel: gameNow && gameWindow ? [{ pkg: "game", name: gameNow.name, open: gameOpen }] : []
-    Component { id: gameWindowComponent; GameWindow {} }
+    Component {
+        id: gameWindowComponent
+        GameWindow { touchScrollSpeed: DeskStyle.tablet ? screenSettings.touchScrollSpeed : 100 }
+    }
     function activateGame(game) {
         bar.menuOpen = false
         if (gamePid >= 0 && gameNow && gameNow.path === game.path && !gameNext) {
@@ -1019,6 +1196,25 @@ Item {
                                             .replace("file://", "") + "/naomi/opt/claude-desktop/naomi-claude"
     property real claudePid: -1
     property var claudeWindows: []
+    Settings {
+        id: telegramSettings
+        location: StandardPaths.writableLocation(StandardPaths.ConfigLocation) + "/naomi/desktop/telegram.conf"
+        category: "telegram"
+        property bool maximized: false
+        property rect window: Qt.rect(0, 0, 0, 0)
+    }
+    property real telegramPid: -1
+    property var telegramWindows: []
+    Settings {
+        id: deepseekSettings
+        location: StandardPaths.writableLocation(StandardPaths.ConfigLocation) + "/naomi/desktop/deepseek.conf"
+        category: "deepseek"
+        property bool maximized: false
+        property rect window: Qt.rect(0, 0, 0, 0)
+    }
+    property real deepseekPid: -1
+    property var deepseekWindows: []
+    property var linuxWindows: []
     readonly property real claudeOpen: {   // черта под CLAUDE: 1 — окно на виду, 0,5 — свёрнуто или запускается
         windowsTick
         return claudeWindows.some(w => !w.minimized) ? 1 : claudeWindows.length || claudePid >= 0 ? 0.5 : 0
@@ -1026,6 +1222,36 @@ Item {
     readonly property var claudePanel: {
         windowsTick
         return claudeWindows.map((w, i) => ({ pkg: "claude:" + i, name: w.title || "Claude", open: w.minimized ? 0.5 : 1 }))
+    }
+    readonly property real telegramOpen: {
+        windowsTick
+        return telegramWindows.some(w => !w.minimized) ? 1 : telegramWindows.length || telegramPid >= 0 ? 0.5 : 0
+    }
+    readonly property var telegramPanel: {
+        windowsTick
+        return telegramWindows.map((w, i) => ({ pkg: "telegram:" + i, name: w.title || "Telegram", open: w.minimized ? 0.5 : 1 }))
+    }
+    readonly property real deepseekOpen: {
+        windowsTick
+        return deepseekWindows.some(w => !w.minimized) ? 1 : deepseekWindows.length || deepseekPid >= 0 ? 0.5 : 0
+    }
+    readonly property var deepseekPanel: {
+        windowsTick
+        return deepseekWindows.map((w, i) => ({ pkg: "deepseek:" + i, name: "DEEPSEEK", open: w.minimized ? 0.5 : 1 }))
+    }
+    readonly property var linuxPanel: {
+        windowsTick
+        return linuxWindows.map((w, i) => ({ pkg: "linux:" + i, name: w.title || "Linux", open: w.minimized ? 0.5 : 1 }))
+    }
+    function activateLinuxApp(app) {
+        if (!app || !app.program)
+            return
+        bar.menuOpen = false
+        if (app.terminal) {
+            openTerminalAt("~")
+            return
+        }
+        naomiApps.run("linux-" + (app.id || "app"), app.program, naomiDesk.scale, app.args || [], false)
     }
     function activateClaude() {
         const w = claudeWindows[0]
@@ -1035,10 +1261,35 @@ Item {
                 claudePid = pid
             return
         }
-        toggleClaude(0)
+        toggleLinux(w)
     }
-    function toggleClaude(index) {
-        const w = claudeWindows[index]
+    function activateTelegram() {
+        nmenu.telegramError = ""
+        nmenu.deepseekError = ""
+        const w = telegramWindows[0]
+        if (w) {
+            bar.menuOpen = false
+            toggleLinux(w)
+        } else if (telegramPid < 0) {
+            telegramPid = naomiApps.run("telegram", "/usr/local/lib/naomi/naomi-telegram", naomiDesk.scale, [], false)
+            if (telegramPid < 0)
+                nmenu.telegramError = "Не удалось запустить Telegram Desktop"
+        }
+    }
+    function activateDeepseek() {
+        nmenu.telegramError = ""
+        nmenu.deepseekError = ""
+        const w = deepseekWindows[0]
+        if (w) {
+            bar.menuOpen = false
+            toggleLinux(w)
+        } else if (deepseekPid < 0) {
+            deepseekPid = naomiApps.run("deepseek", "/usr/local/lib/naomi/naomi-deepseek", naomiDesk.scale, [], false)
+            if (deepseekPid < 0)
+                nmenu.deepseekError = "Не удалось запустить DeepSeek"
+        }
+    }
+    function toggleLinux(w) {
         if (!w)
             return
         if (!w.minimized && w.active) {
@@ -1048,22 +1299,28 @@ Item {
         raise(w)
         w.takeFocus()
     }
-    function claudeBox(n) {   // по центру, не шире 1400 и не выше 940; следующие окна — со сдвигом
-        const r = claudeSettings.window, aw = windows.width, ah = windows.height
-        if (n === 0 && r.width >= 320 && r.height >= 280 && r.x + r.width > 40 && r.x < aw - 40 && r.y >= 0 && r.y < ah - 40)
+    function linuxBox(n, saved) {   // по центру, не шире 1400 и не выше 940; следующие окна — со сдвигом
+        const aw = windows.width, ah = windows.height, r = saved
+        if (r && n === 0 && r.width >= 320 && r.height >= 280 && r.x + r.width > 40 && r.x < aw - 40 && r.y >= 0 && r.y < ah - 40)
             return Qt.rect(r.x, r.y, Math.min(r.width, aw), Math.min(r.height, ah))
         const w = Math.min(aw - 64, 1400), h = Math.min(ah - 64, 940)
         return Qt.rect(Math.round((aw - w) / 2) + n * 28, Math.round((ah - h) / 2) + n * 28, w, h)
     }
-    function claudeArrived(toplevel, xdgSurface) {
-        const n = claudeWindows.length
+    function linuxArrived(toplevel, xdgSurface, app) {
+        const list = app + "Windows"
+        const n = desk[list].length
+        const settings = app === "claude" ? claudeSettings
+                       : app === "telegram" ? telegramSettings
+                       : app === "deepseek" ? deepseekSettings : null
         const w = gameWindowComponent.createObject(windows, {
-            area: windows, toplevel: toplevel, xdgSurface: xdgSurface, system: "app", label: "", glyph: "claude",
-            title: Qt.binding(() => toplevel.title), box: claudeBox(n), maximized: n === 0 && claudeSettings.maximized,
-            alwaysMaximized: true })   // без своей тени и углов Chromium — процессору легче (GameWindow)
+            area: windows, toplevel: toplevel, xdgSurface: xdgSurface, system: "app", label: "", glyph: settings ? app : "monitor",
+            title: Qt.binding(() => toplevel.title), box: linuxBox(n, settings ? settings.window : null),
+            maximized: !!settings && n === 0 && settings.maximized,
+            alwaysMaximized: app === "claude",
+            naomiInput: app === "deepseek" })
         w.activated.connect(() => raise(w))
         w.closed.connect(() => {
-            desk.claudeWindows = desk.claudeWindows.filter(o => o !== w)
+            desk[list] = desk[list].filter(o => o !== w)
             w.destroy()
             ++windowsTick
             const rest = windows.children.filter(o => o !== w && !o.minimized && !o.closing && !o.parked)
@@ -1078,13 +1335,15 @@ Item {
         })
         w.closeClicked.connect(() => toplevel.sendClose())
         w.saveRequested.connect(() => {
-            if (desk.claudeWindows[0] !== w)
+            if (!settings || desk[list][0] !== w)
                 return
-            claudeSettings.window = w.box
-            claudeSettings.maximized = w.maximized
+            settings.window = w.box
+            settings.maximized = w.maximized
         })
         w.minimizedChanged.connect(() => {
             ++windowsTick
+            if (app === "deepseek" && desk.deepseekPid > 0)
+                naomiApps.pause(desk.deepseekPid, w.minimized)
             if (w.minimized && w.active) {
                 w.active = false
                 const rest = windows.children.filter(o => o !== w && !o.minimized && !o.closing && !o.parked)
@@ -1092,7 +1351,7 @@ Item {
                     raise(rest.reduce((a, b) => a.z > b.z ? a : b))
             }
         })
-        claudeWindows = claudeWindows.concat([w])
+        desk[list] = desk[list].concat([w])
         ++windowsTick
         raise(w)
         w.takeFocus()
@@ -1114,6 +1373,10 @@ Item {
             return gameNow ? gameNow.name : w && w.title ? w.title : "Windows"
         if (a === "claude")
             return "Claude"
+        if (a === "telegram")
+            return "Telegram"
+        if (a === "deepseek")
+            return "DeepSeek"
         if (a === "web")
             return "Naomi Web"
         return w && w.title ? w.title : w && w.toplevel && w.toplevel.appId ? w.toplevel.appId : "pid " + pid
@@ -1138,7 +1401,8 @@ Item {
             add({ key: "android:" + a.pkg, pkg: a.pkg, name: a.name })
         if (termWindow && !termWindow.closing && naomiTerm.running)
             add({ key: "term", term: true, name: "Терминал" })
-        for (const [pid, app] of [[webPid, "web"], [claudePid, "claude"], [gamePid, "game"]])
+        for (const [pid, app] of [[webPid, "web"], [claudePid, "claude"], [telegramPid, "telegram"],
+                                  [deepseekPid, "deepseek"], [gamePid, "game"]])
             if (pid > 0)
                 add({ key: "pid:" + pid, pid: pid, name: forceName(pid, null, gamePid === pid && gameIsWin ? "win" : app) })
         return out
@@ -1466,7 +1730,8 @@ Item {
             webMenu.show(desk.pointer.x, desk.pointer.y, [
                 { text: "Назад", tone: "off", action: "back" },
                 { text: "Вперёд", tone: "off", action: "forward" },
-                { text: "Обновить", tone: "off", action: "reload" }])
+                { text: "Обновить", tone: "off", action: "reload" },
+                { text: "Тёмная / светлая страница", tone: "off", action: "toggle-dark" }])
         }
         function onFieldRequested(text) {
             if (desk.webWindow && !desk.webShown)
@@ -1673,20 +1938,23 @@ Item {
     // окно батареи (BatteryPopover; docs/DESKTOP.md, «Батарея») — одно из окон под значками: открылось другое окно,
     // меню N или щёлкнули по программе на панели — закрыть
     property bool batteryOpen: false
-    onSoundOpenChanged: if (soundOpen) batteryOpen = false
-    onBtOpenChanged: if (btOpen) batteryOpen = false
-    onInetOpenChanged: if (inetOpen) batteryOpen = false
+    property bool clipOpen: false
+    onSoundOpenChanged: if (soundOpen) { batteryOpen = false; clipOpen = false }
+    onBtOpenChanged: if (btOpen) { batteryOpen = false; clipOpen = false }
+    onInetOpenChanged: if (inetOpen) { batteryOpen = false; clipOpen = false }
+    onBatteryOpenChanged: if (batteryOpen) clipOpen = false
+    onClipOpenChanged: if (clipOpen) { batteryOpen = false; soundOpen = false; btOpen = false; inetOpen = false; bar.menuOpen = false }
     Connections {
         target: bar
-        function onMenuOpenChanged() { if (bar.menuOpen) desk.batteryOpen = false }
-        function onFilesClicked() { desk.batteryOpen = false }
-        function onWebClicked() { desk.batteryOpen = false }
-        function onTermClicked() { desk.batteryOpen = false }
-        function onAndroidClicked(pkg) { desk.batteryOpen = false }
+        function onMenuOpenChanged() { if (bar.menuOpen) { desk.batteryOpen = false; desk.clipOpen = false } }
+        function onFilesClicked() { desk.batteryOpen = false; desk.clipOpen = false }
+        function onWebClicked() { desk.batteryOpen = false; desk.clipOpen = false }
+        function onTermClicked() { desk.batteryOpen = false; desk.clipOpen = false }
+        function onAndroidClicked(pkg) { desk.batteryOpen = false; desk.clipOpen = false }
     }
     DeskBattery {   // заряд и прогноз для значка и окна; ток спрашивает, только пока стол смотрят
         id: battery
-        live: naomiStream.connected && naomiStream.desktop && !naomiStream.deskAway
+        live: DeskStyle.tablet ? naomiPower.displayOn : naomiStream.connected && naomiStream.desktop && !naomiStream.deskAway
         open: desk.batteryOpen
     }
     // монитор системы (MonitorPopover): открыт, пока по индикатору подключения не щёлкнут снова; собран — с первого
@@ -1762,6 +2030,8 @@ Item {
         rememberMonitor()
         spareTimer.start()      // запас «Файлов» — через 1,5 с покоя
         padCount = naomiGames.gamepads.length   // геймпад, что уже был, — не «появился»
+        if (DeskStyle.tablet && naomiKeyboard && naomiKeyboard.visible)
+            keyboardBuilt = true
     }
     Connections {
         target: naomiPhone
@@ -1772,7 +2042,7 @@ Item {
     Binding {
         target: naomiStream
         property: "wallpaper"
-        value: naomiFiles.wallpaper !== "" ? deskWallpaper + "?" + naomiFiles.wallpaperVersion : "none"
+        value: String(naomiFiles.desktopWallpaper) || "none"
     }
     // щелчок по значку выхода — следующий по кругу: «Динамики» → «Телефон» → «Наушники» (монитора или наушников нет —
     // без них; выход один — щелчок ничего не меняет). Ушли с наушников на связи — они звук больше не перехватывают
@@ -1835,7 +2105,9 @@ Item {
     Connections {   // кнопки громкости телефона, пока смотрят стол: шаг делает оболочка телефона, плашка — и здесь
         target: naomiPower
         function onVolumeKey(direction) {
-            if (naomiStream.desktop && !desk.soundOpen)
+            if (DeskStyle.tablet)
+                desk.soundStep(direction)
+            if ((DeskStyle.tablet || naomiStream.desktop) && !desk.soundOpen)
                 volumeOsd.show()
         }
     }
@@ -1930,7 +2202,7 @@ Item {
         width: parent.width
         height: parent.height - y
         z: 1001
-        enabled: bar.menuOpen || desk.soundOpen || desk.btOpen || desk.inetOpen || desk.batteryOpen
+        enabled: bar.menuOpen || desk.soundOpen || desk.btOpen || desk.inetOpen || desk.batteryOpen || desk.clipOpen
         Component.onCompleted: cursorShape = undefined   // без формы — как у той, что над меню браузера
         onPressed: {
             bar.menuOpen = false
@@ -1938,6 +2210,7 @@ Item {
             desk.btOpen = false
             desk.inetOpen = false
             desk.batteryOpen = false
+            desk.clipOpen = false
         }
     }
 
@@ -1980,7 +2253,8 @@ Item {
     Binding {
         target: naomiMonitor
         property: "active"
-        value: desk.monitorOpen && naomiStream.connected && naomiStream.desktop && !naomiStream.deskAway
+        value: desk.monitorOpen && (DeskStyle.tablet ? naomiPower.displayOn
+                             : naomiStream.connected && naomiStream.desktop && !naomiStream.deskAway)
                && (!monitorLoader.item || monitorLoader.item.view === "monitor")   // вид «Экраны» графиков не считает
     }
 
@@ -2003,7 +2277,16 @@ Item {
         x: Math.max(DeskStyle.popGap, Math.min(desk.width - 8 - width, bar.batteryRight + 6 - width))
         y: DeskStyle.panelH + DeskStyle.popGap
         open: desk.batteryOpen
+        clock24h: uiSettings.clock24h
         battery: battery
+    }
+
+    ClipboardPopover {
+        z: 1002
+        x: Math.max(DeskStyle.popGap, Math.min(desk.width - 8 - width, bar.clipRight + 6 - width))
+        y: DeskStyle.panelH + DeskStyle.popGap
+        open: desk.clipOpen
+        onDismissed: desk.clipOpen = false
     }
 
     SoundPopover {
@@ -2057,6 +2340,9 @@ Item {
         androidLaunching: desk.androidLaunching
         androidState: naomiAndroid.state
         onAndroidActivated: (pkg) => desk.activateAndroid(pkg)
+        linuxApps: naomiSystemTools.linuxApps
+        onLinuxAppActivated: (app) => desk.activateLinuxApp(app)
+        onLinuxAppsRefreshed: naomiSystemTools.refreshLinuxApps()
         games: naomiGames.games
         gameRunning: desk.gameNow ? desk.gameNow.path : ""
         gameOpen: desk.gameOpen
@@ -2081,14 +2367,36 @@ Item {
             bar.menuOpen = false
             desk.activateClaude()
         }
+        telegramOpen: desk.telegramOpen
+        onTelegramClicked: desk.activateTelegram()
+        deepseekOpen: desk.deepseekOpen
+        onDeepseekClicked: desk.activateDeepseek()
+        onBootAndroidRequested: {
+            bar.menuOpen = false
+            confirmAndroid.active = true
+        }
         onSystemAction: (action) => {
             bar.menuOpen = false
             if (action === "settings")
                 desk.openSettings()
+            else if (action === "sleep")
+                naomiPower.sleep()
             else if (action === "leave")   // закрыть сессию — как плитка «трансляция» в шторке телефона
                 naomiStream.enabled = false
             else   // перезагрузить телефон — службой железа (docs/NAOMID.md, «Система»)
                 naomiPhone.system.call("Reboot")
+        }
+    }
+
+    Loader {
+        id: confirmAndroid
+        anchors.fill: parent
+        active: false
+        z: 3010
+        focus: active
+        onLoaded: item.forceActiveFocus()
+        sourceComponent: BootAndroidDialog {
+            onDismissed: confirmAndroid.active = false
         }
     }
 
@@ -2100,8 +2408,8 @@ Item {
         scale: 0.96 + 0.04 * desk.chromeIn
         transformOrigin: Item.Top
         filesOpen: desk.filesOpen
-        // игра, окна программ Windows и Claude — там же, перед приложениями Android
-        androidApps: desk.gamePanel.concat(desk.winPanel, desk.claudePanel, desk.androidPanel)
+        // игра и окна программ Windows/Linux — перед приложениями Android
+        androidApps: desk.gamePanel.concat(desk.winPanel, desk.claudePanel, desk.telegramPanel, desk.deepseekPanel, desk.linuxPanel, desk.androidPanel)
         onAndroidClicked: (pkg) => {
             menuOpen = false
             desk.soundOpen = false
@@ -2112,7 +2420,13 @@ Item {
             else if (pkg.startsWith("win:"))
                 desk.toggleWin(parseInt(pkg.substring(4)))
             else if (pkg.startsWith("claude:"))
-                desk.toggleClaude(parseInt(pkg.substring(7)))
+                desk.toggleLinux(desk.claudeWindows[parseInt(pkg.substring(7))])
+            else if (pkg.startsWith("telegram:"))
+                desk.toggleLinux(desk.telegramWindows[parseInt(pkg.substring(9))])
+            else if (pkg.startsWith("deepseek:"))
+                desk.toggleLinux(desk.deepseekWindows[parseInt(pkg.substring(9))])
+            else if (pkg.startsWith("linux:"))
+                desk.toggleLinux(desk.linuxWindows[parseInt(pkg.substring(6))])
             else
                 desk.toggleAndroid(pkg)
         }
@@ -2219,5 +2533,20 @@ Item {
             desk.inetOpen = false
             desk.activateWeb()
         }
+        onKeyboardClicked: desk.toggleKeyboard()
+        onScreenshotClicked: desk.screenshot(Qt.rect(0, 0, 0, 0))
+        clipOpen: desk.clipOpen
+        onClipClicked: desk.clipOpen = !desk.clipOpen
+        clock24h: uiSettings.clock24h
+        clockSeconds: uiSettings.clockSeconds
+        dateFormat: uiSettings.dateFormat
+    }
+
+    // Ночной тёплый фильтр экрана — мягкий янтарный слой поверх стола, пропускает все касания
+    Rectangle {
+        z: 9999
+        anchors.fill: parent
+        visible: uiSettings.nightFilter > 0.01
+        color: Qt.rgba(1.0, 0.50, 0.12, Math.min(0.32, uiSettings.nightFilter * 0.45))
     }
 }

@@ -5,6 +5,7 @@ import QtQuick
 import Naomi.Ui
 
 QtObject {
+    readonly property bool tablet: typeof naomiTablet !== "undefined" && naomiTablet
     readonly property color bg: "#0e0f0c"          // N_BG — уголь панели
     readonly property color surface: Theme.surface // N_SURFACE #161614 — всплывающее
     readonly property color text: Theme.text
@@ -21,15 +22,15 @@ QtObject {
     readonly property color unlit: Qt.rgba(236 / 255, 233 / 255, 227 / 255, 0.2)   // погасшие дуги Wi-Fi
 
     readonly property real line: 0.16        // N_LINE: линии и рамки — янтарь с этой прозрачностью
-    readonly property int panelH: 40         // PANEL_H — с линией снизу
+    readonly property int panelH: tablet ? 60 : 40
     readonly property int panelSide: 16      // PANEL_SIDE
-    readonly property int appH: 30           // N_APP_H — элемент панели
+    readonly property int appH: tablet ? 44 : 30
     readonly property real icon: 14          // N_ICON — значок с линией
     readonly property real iconLine: 1.5     // N_ICON_LINE
-    readonly property int sepGap: 20         // N_SEP_GAP — от черты до видимых краёв соседей
+    readonly property int sepGap: tablet ? 32 : 20
     readonly property int itemPad: 12        // N_ITEM_PAD
     readonly property int itemGap: 2         // N_ITEM_GAP — между элементами одной группы
-    readonly property int btnH: 34           // N_BTN_H — кнопка меню (draw_nbutton)
+    readonly property int btnH: tablet ? 44 : 34
     readonly property int doubleClickMs: 400 // DOUBLE_CLICK_MS
     readonly property int caretBlinkMs: 530  // CARET_BLINK_MS
     readonly property real itemHover: 0.07   // N_ITEM_HOVER
@@ -48,12 +49,13 @@ QtObject {
     readonly property int tileGap: 6         // APP_TILE_GAP
     readonly property int gamesGap: 6        // GAMES_GAP — между модулями меню
     // края окон — за них тянут размер (EdgeGrip). У НаомиОС рамка 8 снаружи (WEB_EDGE) — пользователю мала
-    readonly property int edgeOut: 12        // полоса снаружи окна
+    readonly property int edgeOut: tablet ? 18 : 12
     readonly property int edgeIn: 4          // и внутри (окна стола; сверху — не до кнопок полосы, они с 5)
     readonly property int edgeCorner: 32     // угол ловится на столько вдоль сторон — вся дуга закругления (≤ 32)
 
     // браузер (bcdesk.c, полоса Naomi Web; docs/WEB.md)
-    readonly property int webBarH: 40        // WEB_BAR_H — полоса над страницей, с линией снизу
+    readonly property int webBarH: tablet ? 54 : 40
+    readonly property int windowButton: tablet ? 44 : 30
     readonly property int webTabW: 200       // WEB_TAB_W — вкладка не шире
     readonly property int webTabMin: 56      // WEB_TAB_MIN — уже не ужимаем
     readonly property int webActiveMin: 320  // WEB_ACTIVE_MIN — строка адреса не уже

@@ -1,4 +1,5 @@
 #include "gpu.h"
+#include "device_profile.h"
 
 #include <QFile>
 #include <QLoggingCategory>
@@ -27,6 +28,8 @@ Gpu::Gpu(QObject *parent)
     : BusObject("/org/naomi/Phone/Gpu", "org.naomi.Phone.Gpu", parent)
 {
     set("Fast", false);
+    if (!DeviceProfile::current().pixel)
+        return;  // ступени SM7250 не определяют поведение Adreno 650
     // «свой» уровень — не то, что стоит сейчас (служба могла упасть, держа границу), а самый низкий
     const int levels = readInt("num_pwrlevels");
     m_lowest = levels > 0 ? levels - 1 : -1;

@@ -40,6 +40,8 @@ Window {
     WebEngineView {
         id: view
         anchors.fill: parent
+        settings.javascriptCanAccessClipboard: true
+        settings.javascriptCanPaste: true
         property bool ready: false   // страница уже открывалась: дальше её ошибки — её дело (без шторки)
         opacity: ready ? 1 : 0
         Behavior on opacity { NumberAnimation { duration: 180 } }
@@ -68,7 +70,26 @@ Window {
         // профиль — когда все его свойства заданы (иначе движок молча берёт «инкогнито», docs/WEB.md)
         const profile = proto.instance()
         profile.downloadPath = webDownloadDir
-        profile.httpUserAgent = profile.httpUserAgent.replace(/ QtWebEngine\/[0-9.]+/, "")
+        const cleanUa = String(profile.httpUserAgent || "")
+            .replace(/\s*QtWebEngine\/[0-9.]+/g, "")
+            .replace(/Linux aarch64/g, "Linux x86_64")
+            .replace(/\s{2,}/g, " ")
+            .trim()
+        profile.httpUserAgent = cleanUa
+        if (profile.clientHints) {
+            const m = cleanUa.match(/Chrome\/([0-9]+(?:\.[0-9]+)*)/)
+            const ver = m ? m[1] : "134.0.0.0"
+            profile.clientHints.arch = "x86"
+            profile.clientHints.bitness = "64"
+            profile.clientHints.platform = "Linux"
+            profile.clientHints.isMobile = false
+            profile.clientHints.fullVersion = ver
+            profile.clientHints.fullVersionList = {
+                "Chromium": ver,
+                "Google Chrome": ver,
+                "Not:A-Brand": "24.0.0.0"
+            }
+        }
         profile.downloadRequested.connect((download) => download.accept())
         view.profile = profile
         view.url = appUrl

@@ -1,4 +1,4 @@
-// naomid — Wi-Fi через NetworkManager (wlan0): состояние, сеть, сила сигнала, сети вокруг, управление.
+// naomid — Wi-Fi через NetworkManager: состояние, сеть, сила сигнала, сети вокруг, управление.
 // Всё по сигналам NetworkManager: состояние устройства, активная точка доступа, конец скана, сохранённые
 // подключения. Список сетей — дорогой (одним вызовом GetManagedObjects, точек вокруг под сотню, и
 // NetworkManager сканирует в фоне сам), поэтому он живой, только пока его смотрят: Scan() — и минуту
@@ -60,7 +60,7 @@ private slots:
     void onDeviceState(uint newState, uint oldState, uint reason);
     void onApProps(const QString &iface, const QVariantMap &changed, const QStringList &invalidated);
     void onSettingsChanged();
-    void onDevicesChanged();            // при загрузке wlan0 появляется в NetworkManager позже нас
+    void onDevicesChanged();            // интерфейс может появиться позже службы
 
 private:
     struct Ap {
@@ -69,6 +69,8 @@ private:
     };
 
     void start();                       // NetworkManager появился
+    void findDevice();
+    void watchDevice(const QString &dev, const QString &iface);
     void loadDevice();
     void loadKnown();
     void loadNetworks();
@@ -79,7 +81,9 @@ private:
     bool listWanted() const { return m_listWanted.isValid() && m_listWanted.elapsed() < 60000; }
     void applyPowerSave();              // iw: сбережение выключено, пока есть кто держит; иначе — как обычно (вкл)
 
-    QString m_dev;                      // путь устройства wlan0 в NetworkManager
+    QString m_dev;                      // путь устройства в NetworkManager
+    QString m_iface;                    // имя устройства для iw
+    quint64 m_discovery = 0;
     QString m_ap;                       // активная точка доступа
     uint m_devState = 0;
     bool m_radio = false;               // WirelessEnabled

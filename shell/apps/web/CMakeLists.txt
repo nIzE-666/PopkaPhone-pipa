@@ -1,7 +1,7 @@
 # naomi-web — «Браузер»: Naomi Web с НаомиОС (docs/WEB.md), отдельный процесс, клиент Wayland оболочки
 # (запускает её оболочка: app_launcher). Движок — Qt WebEngine системы (Chromium 134); полосу рисует стол.
 add_executable(naomi-web main.cpp web_bridge.cpp web_bridge.h web_store.cpp web_store.h web_filter.cpp web_filter.h
-    ${CMAKE_SOURCE_DIR}/app/unix_signals.cpp ${CMAKE_SOURCE_DIR}/app/unix_signals.h)
+    google_auth.h ${CMAKE_SOURCE_DIR}/app/unix_signals.cpp ${CMAKE_SOURCE_DIR}/app/unix_signals.h)
 # заголовков Qt WebEngine в среде сборки нет — связываем с библиотеками системы напрямую (main.cpp); три заголовка
 # API перехватчика запросов — в third_party (README.md там)
 target_include_directories(naomi-web PRIVATE ${CMAKE_SOURCE_DIR}/app ${CMAKE_CURRENT_SOURCE_DIR}/third_party)

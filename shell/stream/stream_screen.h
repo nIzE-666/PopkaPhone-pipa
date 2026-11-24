@@ -4,6 +4,7 @@
 #pragma once
 
 #include <QSize>
+#include <QPointF>
 
 class QQuickWindow;
 
@@ -14,6 +15,7 @@ public:
     virtual QQuickWindow *window() const = 0;
     virtual QSize pixelSize() const = 0;     // кадр
     virtual QSize logicalSize() const = 0;   // в точках: сюда — мышь
+    virtual QPointF mapToWindow(QPointF point) const { return point; }
     // новая форма и масштаб (кадр — заново): кадр — logical × scale, чётный; служба буферы уже отпустила
     virtual void setGeometry(QSize logical, double scale) = 0;
     virtual double scale() const = 0;        // пикселей кадра в точке

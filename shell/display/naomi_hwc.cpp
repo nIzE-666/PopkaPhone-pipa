@@ -10,11 +10,14 @@
 #include <QtGui/QGuiApplication>
 #include <QtGui/QWindow>
 
+#include <algorithm>
+#include <cerrno>
 #include <cmath>
 #include <cstring>
 #include <ctime>
 #include <cstdlib>
 #include <dlfcn.h>
+#include <fcntl.h>
 #include <unistd.h>
 #include <utility>
 
@@ -22,6 +25,7 @@
 #include <hybris/gralloc/gralloc.h>
 #include <hybris/hwc2/hwc2_compatibility_layer.h>
 #include <hybris/hwcomposerwindow/hwcomposer.h>
+#include <hybris/hwcomposerwindow/hwcomposer_window.h>
 
 // загрузчик Android-библиотек libhybris (libhybris-common); в hybris/common/binding.h объявлены без
 // extern "C", а сами функции — сишные
@@ -34,11 +38,6 @@ NaomiHwcIntegration *NaomiHwcIntegration::s_instance = nullptr;
 
 namespace {
 
-// Режимы панели Pixel 5 (redfin), как их отдаёт composer: id 0 — 60 Гц, id 1 — 90 Гц.
-// Проверено device/hwcspike.py; docs/DISPLAY.md.
-hwc2_config_t configForHz(int hz) { return hz >= 75 ? 1 : 0; }
-int otherHz(int hz) { return hz >= 75 ? 60 : 90; }
-
 // Сколько кадров ждать после смены режима, прежде чем мерить, и сколько интервалов мерить.
 constexpr int kSettleFrames = 12;
 constexpr int kKickFrames = 6;
@@ -49,10 +48,26 @@ struct VsyncConstraints { int64_t desiredTimeNanos; bool seamlessRequired; };
 struct VsyncTimeline { int64_t newVsyncAppliedTimeNanos; bool refreshRequired; int64_t refreshTimeNanos; };
 using SetActiveConfigFn = int32_t (*)(void *display, uint32_t config, const VsyncConstraints *,
                                       VsyncTimeline *);
+using GetVsyncPeriodFn = int32_t (*)(const void *display, int64_t *period);
+using GetAttributeFn = int32_t (*)(void *display, uint32_t config, int32_t attribute);
 
 const char kSetConfigSymbol[] =
     "_ZN7android4HWC24impl7Display30setActiveConfigWithConstraintsEjRKNS_8hardware8graphics8"
     "composer4V2_415IComposerClient28VsyncPeriodChangeConstraintsEPNS6_25VsyncPeriodChangeTimelineE";
+const char kVsyncPeriodSymbol[] = "_ZNK7android4HWC24impl7Display21getDisplayVsyncPeriodEPl";
+const char kGetAttributeSymbol[] =
+    "_ZN7android4HWC24impl7Display12getAttributeEjNS_8hardware8graphics8composer4V2_415IComposerClient9AttributeE";
+
+void *androidDisplay(hwc2_compat_display *display)
+{
+    return *reinterpret_cast<void **>(display);   // hwc2_compat_display { HWC2::Display *self; }
+}
+
+int refreshRates(int *out, int capacity)
+{
+    auto *self = NaomiHwcIntegration::instance();
+    return self ? self->refreshRates(out, capacity) : 0;
+}
 
 void frameSnapshot(NaomiFrameSnapshot *out)
 {
@@ -101,11 +116,40 @@ public:
     }
 };
 
+class PipaNativeWindow : public HWComposerNativeWindow
+{
+public:
+    PipaNativeWindow(QSize panel, HWCPresentCallback callback, void *data)
+        : HWComposerNativeWindow(panel.width(), panel.height(), HAL_PIXEL_FORMAT_RGBA_8888)
+        , m_callback(callback), m_data(data)
+    {
+        setUsage(0);
+        setBufferCount(3);
+    }
+
+protected:
+    int setUsage(uint64_t usage) override
+    {
+        // QTI gralloc: разрешение чтения CPU оставляет цветовой буфер линейным (без UBWC).
+        return HWComposerNativeWindow::setUsage(usage | GRALLOC_USAGE_HW_COMPOSER | GRALLOC_USAGE_HW_RENDER
+                                               | GRALLOC_USAGE_SW_READ_RARELY);
+    }
+
+    int setBufferCount(int count) override { return HWComposerNativeWindow::setBufferCount(std::max(3, count)); }
+
+    void present(HWComposerNativeWindowBuffer *buffer) override { m_callback(m_data, this, buffer); }
+
+private:
+    HWCPresentCallback m_callback;
+    void *m_data;
+};
+
 } // namespace
 
 struct NaomiHwcIntegration::Listener : HWC2EventListener
 {
     NaomiHwcIntegration *self;
+    std::atomic<hwc2_display_t> primaryId{0};
 };
 
 NaomiHwcIntegration::NaomiHwcIntegration()
@@ -121,7 +165,10 @@ NaomiHwcIntegration::~NaomiHwcIntegration()
 
 void NaomiHwcIntegration::platformInit()
 {
+    const auto &profile = DeviceProfile::current();
     setenv("EGL_PLATFORM", "hwcomposer", 0);
+    if (!qEnvironmentVariableIsSet("QT_QPA_EGLFS_HIDECURSOR"))
+        qputenv("QT_QPA_EGLFS_HIDECURSOR", profile.tablet ? "0" : "1");
 
     m_device = hwc2_compat_device_new(false);
     if (!m_device)
@@ -130,89 +177,230 @@ void NaomiHwcIntegration::platformInit()
     m_listener = new Listener;
     m_listener->on_vsync_received = [](HWC2EventListener *, int32_t, hwc2_display_t, int64_t) {};
     m_listener->on_hotplug_received = [](HWC2EventListener *l, int32_t, hwc2_display_t display,
-                                         bool connected, bool) {
-        hwc2_compat_device_on_hotplug(static_cast<Listener *>(l)->self->m_device, display, connected);
+                                         bool connected, bool primary) {
+        auto *self = static_cast<Listener *>(l)->self;
+        hwc2_compat_device_on_hotplug(self->m_device, display, connected);
+        if (primary && connected)
+            static_cast<Listener *>(l)->primaryId = display;
     };
-    m_listener->on_refresh_received = [](HWC2EventListener *, int32_t, hwc2_display_t) {};
+    m_listener->on_refresh_received = [](HWC2EventListener *l, int32_t, hwc2_display_t id) {
+        auto *listener = static_cast<Listener *>(l);
+        if (DeviceProfile::current().tablet && id == listener->primaryId.load())
+            listener->self->requestFullFrame();
+    };
     m_listener->self = this;
     hwc2_compat_device_register_callback(m_device, m_listener, 0);
 
     for (int i = 0; i < 50 && !m_display; ++i) {
-        m_display = hwc2_compat_device_get_display_by_id(m_device, 0);
+        const auto id = profile.tablet ? m_listener->primaryId.load() : 0;
+        m_display = hwc2_compat_device_get_display_by_id(m_device, id);
         if (!m_display)
             QThread::msleep(100);
     }
     if (!m_display)
-        qFatal("naomi.hwc: дисплей 0 не появился");
+        qFatal("naomi.hwc: основной дисплей не появился");
 
     hwc2_compat_display_set_power_mode(m_display, HWC2_POWER_MODE_ON);
 
     void *lib = android_dlopen("libhwc2_compat_layer.so", RTLD_NOW);
     m_setConfigSym = lib ? android_dlsym(lib, kSetConfigSymbol) : nullptr;
+    m_vsyncPeriodSym = lib && profile.tablet ? android_dlsym(lib, kVsyncPeriodSymbol) : nullptr;
     if (!m_setConfigSym)
         qCWarning(lcNaomiHwc, "нет setActiveConfigWithConstraints — частота останется как есть");
 
     readActiveConfig();
-    m_panel = m_size;
+    if (profile.tablet && m_panel.width() < m_panel.height()) {
+        m_sceneRotation = profile.landscapeRotation;
+        bool ok = false;
+        const int rotation = qEnvironmentVariableIntValue("NAOMI_ROTATION", &ok);
+        if (ok && (rotation == 0 || rotation == 90 || rotation == 270))
+            m_sceneRotation = rotation;
+    }
+
+    m_modes = profile.displayModes;
+    if (profile.tablet) {
+        if (m_activeConfigId >= 0)
+            m_modes.append({qRound(m_refreshHz.load()), m_activeConfigId});
+        const auto attribute = reinterpret_cast<GetAttributeFn>(lib ? android_dlsym(lib, kGetAttributeSymbol) : nullptr);
+        if (attribute) {
+            // У C API libhybris есть только активный режим. Читаем атрибуты без смены режима.
+            // Этот HAL использует малые ID с нуля. Пустые ID между режимами допустимы.
+            constexpr uint32_t probeLimit = 32;
+            void *display = androidDisplay(m_display);
+            for (uint32_t id = 0; id < probeLimit; ++id) {
+                if (int(id) == m_activeConfigId)
+                    continue;
+                const int32_t period = attribute(display, id, HWC2_ATTRIBUTE_VSYNC_PERIOD);
+                if (period <= 0 || attribute(display, id, HWC2_ATTRIBUTE_WIDTH) != m_panel.width()
+                    || attribute(display, id, HWC2_ATTRIBUTE_HEIGHT) != m_panel.height())
+                    continue;
+                const int hz = qRound(1e9 / period);
+                if (hz >= 24 && hz <= 240 && configForHz(hz) < 0)
+                    m_modes.append({hz, int(id)});
+            }
+        } else {
+            qCWarning(lcNaomiHwc, "нет getAttribute — оставляю активный режим pipa");
+        }
+        std::sort(m_modes.begin(), m_modes.end(), [](const auto &a, const auto &b) { return a.hz < b.hz; });
+        for (const auto &mode : m_modes)
+            qCInfo(lcNaomiHwc, "режим HWC2 %d: %d Гц", mode.configId, mode.hz);
+    }
     // Частоту включает поток отрисовки, когда кадры уже идут (driveRefresh): режим, заданный до
     // первого кадра, composer запоминает, а панель остаётся на старом. Qt сразу знает целевую.
-    const QByteArray hz = qgetenv("NAOMI_REFRESH");
-    const int initialHz = hz.isEmpty() ? 90 : hz.toInt();
-    m_refreshHz = initialHz;
-    requestRefresh(initialHz);
+    const int requestedHz = qEnvironmentVariableIntValue("NAOMI_REFRESH");
+    const int initialHz = configForHz(requestedHz) >= 0 ? requestedHz : profile.tablet ? 0 : profile.defaultHz;
+    if (requestedHz && requestedHz != initialHz)
+        qCWarning(lcNaomiHwc, "частота %d Гц недоступна", requestedHz);
+    if (requestRefresh(initialHz))
+        m_refreshHz = initialHz;  // оценка интервала для Qt до первых кадров, счётчик использует текущую частоту
+    m_defaultHz = qRound(m_refreshHz.load());
+    // частота покоя: на планшете — 60 Гц (NAOMI_IDLE_HZ — другая, 0 — не снижать); режим должен быть у панели
+    const int idleHz = qEnvironmentVariableIsSet("NAOMI_IDLE_HZ") ? qEnvironmentVariableIntValue("NAOMI_IDLE_HZ")
+                     : profile.tablet ? 60 : 0;
+    m_idleHz = idleHz > 0 && configForHz(idleHz) >= 0 && m_setConfigSym ? idleHz : 0;
+    // панель при старте — на частоте покоя: прошлая оболочка ушла в покое (режим composer помнит). Рабочая тогда —
+    // высшая до 120 Гц (144 — только выбором в настройках)
+    if (m_idleHz && m_defaultHz <= m_idleHz) {
+        for (const auto &mode : m_modes)
+            if (mode.hz <= 120 && mode.hz > m_defaultHz)
+                m_defaultHz = mode.hz;
+        m_requestHz = m_defaultHz;
+    }
+    if (m_idleHz)
+        qCInfo(lcNaomiHwc, "частота в покое: %d Гц (2 с без частых кадров), рабочая — %d Гц", m_idleHz, m_defaultHz);
 
     // Кадр меньше панели (NAOMI_RENDER — ширина, например 720): Qt рисует 720 × 1560, а на панель его растягивает
     // дисплей (MDP) — слой DEVICE с обрезкой по кадру и местом во всю панель. Видеочипу работы меньше, растяжение
     // бесплатно (docs/DISPLAY.md, «Кадр меньше панели»). Плотность — в той же доле: экран в dp тот же.
-    if (const int w = qgetenv("NAOMI_RENDER").toInt(); w >= 360 && w < m_panel.width()) {
+    m_size = m_panel;
+    if (const int w = qEnvironmentVariableIntValue("NAOMI_RENDER"); !profile.tablet && w >= 360 && w < m_panel.width()) {
         const int h = qRound(double(m_panel.height()) * w / m_panel.width() / 2) * 2;
         m_size = QSize(w, h);
-        m_scaled = true;
     }
-    const QByteArray d = qgetenv("NAOMI_DENSITY");
-    m_density = (d.isEmpty() ? 2.75 : d.toDouble()) * m_size.width() / m_panel.width();
+    m_deviceLayer = m_size != m_panel;
+    const double density = qgetenv("NAOMI_DENSITY").toDouble();
+    m_density = (std::isfinite(density) && density > 0 ? density : profile.density)
+                * m_size.width() / m_panel.width();
 
     m_layer = hwc2_compat_display_create_layer(m_display);
-    hwc2_compat_layer_set_composition_type(m_layer, m_scaled ? HWC2_COMPOSITION_DEVICE : HWC2_COMPOSITION_CLIENT);
+    if (!m_layer)
+        qFatal("naomi.hwc: composer не создал слой");
+    hwc2_compat_layer_set_composition_type(m_layer, m_deviceLayer ? HWC2_COMPOSITION_DEVICE : HWC2_COMPOSITION_CLIENT);
     hwc2_compat_layer_set_blend_mode(m_layer, HWC2_BLEND_MODE_NONE);
     hwc2_compat_layer_set_source_crop(m_layer, 0, 0, m_size.width(), m_size.height());
     hwc2_compat_layer_set_display_frame(m_layer, 0, 0, m_panel.width(), m_panel.height());
     hwc2_compat_layer_set_visible_region(m_layer, 0, 0, m_panel.width(), m_panel.height());
-
-    qCInfo(lcNaomiHwc, "панель %dx%d, кадр %dx%d%s, %.1f мм × %.1f мм, плотность %.4g, нужно %d Гц",
-           m_panel.width(), m_panel.height(), m_size.width(), m_size.height(),
-           m_scaled ? " (растягивает дисплей)" : "", m_physicalMm.width(), m_physicalMm.height(), m_density,
-           initialHz);
+    qCInfo(lcNaomiHwc, "%s: панель %dx%d, кадр %dx%d, поворот сцены %d°, %.1f мм × %.1f мм, плотность %.4g, цель %.2f Гц",
+           profile.name, m_panel.width(), m_panel.height(), m_size.width(), m_size.height(), m_sceneRotation,
+           m_physicalMm.width(), m_physicalMm.height(), m_density, m_refreshHz.load());
 }
 
 void NaomiHwcIntegration::readActiveConfig()
 {
     HWC2DisplayConfig *c = hwc2_compat_display_get_active_config(m_display);
-    if (!c)
+    if (!c || c->width <= 0 || c->height <= 0)
         qFatal("naomi.hwc: нет активного режима дисплея");
-    m_size = QSize(c->width, c->height);
-    // dpi из composer; если пустой — паспорт Pixel 5: 432 точки на дюйм
-    const qreal dpiX = c->dpiX > 1 ? c->dpiX : 432, dpiY = c->dpiY > 1 ? c->dpiY : 432;
+    m_panel = QSize(c->width, c->height);
+    m_activeConfigId = c->vsyncPeriod > 0 ? int(c->id) : -1;
+    const int dpi = DeviceProfile::current().panelDpi;
+    const qreal dpiX = c->dpiX > 1 ? c->dpiX : dpi, dpiY = c->dpiY > 1 ? c->dpiY : dpi;
     m_physicalMm = QSizeF(c->width / dpiX * 25.4, c->height / dpiY * 25.4);
+    setMeasuredHz(c->vsyncPeriod > 0 ? 1e9 / c->vsyncPeriod : 60);
     free(c);
+}
+
+int NaomiHwcIntegration::configForHz(int hz) const
+{
+    for (const auto &mode : m_modes)
+        if (mode.hz == hz)
+            return mode.configId;
+    return -1;
+}
+
+int NaomiHwcIntegration::refreshRates(int *out, int capacity) const
+{
+    if (out)
+        for (int i = 0; i < qMin<int>(capacity, m_modes.size()); ++i)
+            out[i] = m_modes[i].hz;
+    return int(m_modes.size());
+}
+
+int NaomiHwcIntegration::kickHz(int hz) const
+{
+    const int other = hz == 60 ? 90 : 60;
+    if (configForHz(other) >= 0)
+        return other;
+    for (const auto &mode : m_modes)
+        if (mode.hz != hz)
+            return mode.hz;
+    return 0;
+}
+
+void NaomiHwcIntegration::setMeasuredHz(double hz)
+{
+    m_refreshHz = hz;
+    m_timer.setPeriodNs(int64_t(1e9 / hz));
 }
 
 bool NaomiHwcIntegration::requestRefresh(int hz)
 {
-    if (!m_setConfigSym || (hz != 60 && hz != 90))
+    if (!m_setConfigSym || configForHz(hz) < 0)
         return false;
+    m_userHz = hz;   // выбор пользователя (настройки, NAOMI_REFRESH) — к нему возвращается покой
     m_requestHz = hz;
     return true;
+}
+
+// Поток отрисовки, в present() до driveRefresh. Покой определяем по промежуткам между кадрами: на столе в покое
+// рисуют только часы (кадр в секунду), а касание, прокрутка, видео, игра — кадры чаще 10 в секунду
+void NaomiHwcIntegration::driveIdle(int64_t nowNs)
+{
+    constexpr int64_t kBusyGapNs = 100000000;    // кадры ближе 100 мс — работа
+    constexpr int64_t kRestAfterNs = 2000000000; // 2 с без работы — покой
+    const int64_t gap = m_lastPresentNs ? nowNs - m_lastPresentNs : INT64_MAX;
+    m_lastPresentNs = nowNs;
+    constexpr int64_t kGraceNs = 300000000;      // после смены частоты — ещё 300 мс не судить
+    if (!m_idleHz)
+        return;
+    if (m_switch != Switch::Idle || m_requestHz.load()) {
+        // идёт смена частоты: её проверочные кадры — не работа. И хвост после неё тоже: последний проверочный кадр
+        // уже в очереди, когда замер сошёлся, — без запаса он через 15 мс возвращал 120 Гц (журнал 23 ноября 2026)
+        m_graceUntilNs = nowNs + kGraceNs;
+        m_busyStreak = 0;
+        return;
+    }
+    if (nowNs < m_graceUntilNs)
+        return;
+    const int user = m_userHz.load();
+    const int fast = user ? user : m_defaultHz;
+    if (fast <= m_idleHz)
+        return;   // выбрана частота не выше покоя — менять нечего
+    const int current = m_targetHz ? m_targetHz : m_defaultHz;
+    if (gap < kBusyGapNs) {
+        m_lastBusyNs = nowNs;
+        if (++m_busyStreak >= 2 && current == m_idleHz) {
+            qCDebug(lcNaomiHwc, "покой кончился: %d Гц", fast);
+            m_requestHz = fast;
+        }
+    } else {
+        m_busyStreak = 0;
+        if (current != m_idleHz && nowNs - m_lastBusyNs > kRestAfterNs) {
+            qCDebug(lcNaomiHwc, "покой: %d Гц", m_idleHz);
+            m_requestHz = m_idleHz;
+        }
+    }
 }
 
 // Поток отрисовки. Внутренний setActiveConfigWithConstraints (в C API libhybris его нет).
 bool NaomiHwcIntegration::applyConfig(int hz)
 {
-    void *hwcDisplay = *reinterpret_cast<void **>(m_display);  // hwc2_compat_display { HWC2::Display *self; }
+    const int config = configForHz(hz);
+    if (!m_setConfigSym || config < 0)
+        return false;
     VsyncConstraints constraints{0, false};
     VsyncTimeline timeline{};
     const int32_t err = reinterpret_cast<SetActiveConfigFn>(m_setConfigSym)(
-        hwcDisplay, configForHz(hz), &constraints, &timeline);
+        androidDisplay(m_display), uint32_t(config), &constraints, &timeline);
     if (err != 0)
         qCWarning(lcNaomiHwc, "режим %d Гц: composer отказал (ошибка %d)", hz, err);
     return err == 0;
@@ -228,15 +416,25 @@ void NaomiHwcIntegration::driveRefresh()
     const int64_t nowNs = int64_t(ts.tv_sec) * 1000000000 + ts.tv_nsec;
     if (m_switch == Switch::Idle && m_recheckAt && nowNs >= m_recheckAt) {   // проверка заново: режим и замер
         m_recheckAt = 0;
-        m_requestHz = m_targetHz;
+        int pending = 0;
+        m_requestHz.compare_exchange_strong(pending, m_targetHz);
     }
     if (const int hz = m_requestHz.exchange(0)) {
         if (hz != m_targetHz)   // новая частота (не повтор проверки) — повторов снова три
             m_rechecks = 0;
         m_targetHz = hz;
-        m_refreshHz = hz;
-        m_timer.setPeriodNs(int64_t(1e9 / hz));
-        m_switch = applyConfig(hz) ? Switch::Settling : Switch::Idle;
+        m_recheckAt = 0;
+        if (applyConfig(hz)) {
+            m_switch = Switch::Settling;
+            setMeasuredHz(hz);
+        } else {
+            m_switch = Switch::Idle;
+            if (HWC2DisplayConfig *active = hwc2_compat_display_get_active_config(m_display)) {
+                if (active->vsyncPeriod > 0)
+                    setMeasuredHz(1e9 / active->vsyncPeriod);
+                free(active);
+            }
+        }
         m_framesSinceSwitch = 0;
         return;
     }
@@ -245,8 +443,7 @@ void NaomiHwcIntegration::driveRefresh()
     ++m_framesSinceSwitch;
     if (m_switch == Switch::Kicking) {
         if (m_framesSinceSwitch >= kKickFrames) {
-            applyConfig(m_targetHz);
-            m_switch = Switch::Resettling;
+            m_switch = applyConfig(m_targetHz) ? Switch::Resettling : Switch::Idle;
             m_framesSinceSwitch = 0;
         }
         return;
@@ -255,32 +452,37 @@ void NaomiHwcIntegration::driveRefresh()
         return;
 
     const double measuredMs = m_timer.recentMedianMs(kMeasureIntervals);
-    if (measuredMs <= 0)
+    double panelMs = measuredMs;
+    if (m_vsyncPeriodSym) {
+        int64_t period = 0;
+        if (reinterpret_cast<GetVsyncPeriodFn>(m_vsyncPeriodSym)(androidDisplay(m_display), &period) == 0 && period > 0)
+            panelMs = period / 1e6;
+    }
+    if (panelMs <= 0)
         return;  // метки ещё не накопились (fence приходят с задержкой)
     // Интервалы длиннее 25 мс — не частота панели (её режимы — 90 и 60 Гц, 11,1 и 16,7 мс), а паузы в рисовании:
     // экран ничем не занят или оболочка только стартует. По ним не судить — ждать сплошных кадров (любая анимация);
     // иначе после перезагрузки выходило «не включилась: 33 мс» при панели на 90 Гц
-    if (measuredMs > 25)
+    const bool tablet = DeviceProfile::current().tablet;
+    if (panelMs > (tablet ? 36 : 25))
         return;
     const double wantedMs = 1000.0 / m_targetHz;
-    if (std::fabs(measuredMs - wantedMs) < 1.0) {
-        qCInfo(lcNaomiHwc, "частота %d Гц: подтверждена, кадр %.2f мс%s", m_targetHz, measuredMs,
+    if (std::fabs(panelMs - wantedMs) < (tablet ? 0.4 : 1.0)) {
+        qCInfo(lcNaomiHwc, "частота %d Гц: период %.2f мс, кадр %.2f мс%s", m_targetHz, panelMs, measuredMs,
                m_switch == Switch::Resettling ? " (после толчка)" : "");
         m_switch = Switch::Idle;
         m_rechecks = 0;
     } else if (m_switch == Switch::Settling) {
         qCInfo(lcNaomiHwc, "частота %d Гц: панель даёт %.2f мс — толчок через %d Гц", m_targetHz,
-               measuredMs, otherHz(m_targetHz));
-        applyConfig(otherHz(m_targetHz));
-        m_switch = Switch::Kicking;
+               panelMs, kickHz(m_targetHz));
+        m_switch = applyConfig(kickHz(m_targetHz)) ? Switch::Kicking : Switch::Resettling;
         m_framesSinceSwitch = 0;
     } else {
         // Не включилась — или замер соврал: сразу после старта оболочка сама рисует реже панели (кадр 33 мс при
         // панели на 90 Гц — после перезагрузки телефона, 16 ноября 2026). Ещё до трёх проверок через 2 с
-        qCWarning(lcNaomiHwc, "частота %d Гц не включилась: кадр %.2f мс%s", m_targetHz, measuredMs,
+        qCWarning(lcNaomiHwc, "частота %d Гц не включилась: период %.2f мс%s", m_targetHz, panelMs,
                   m_rechecks < 3 ? " — проверю снова через 2 с" : "");
-        m_refreshHz = 1000.0 / measuredMs;
-        m_timer.setPeriodNs(int64_t(measuredMs * 1e6));
+        setMeasuredHz(1000.0 / panelMs);
         m_switch = Switch::Idle;
         if (m_rechecks < 3) {
             ++m_rechecks;
@@ -312,9 +514,12 @@ QSurfaceFormat NaomiHwcIntegration::surfaceFormatFor(const QSurfaceFormat &input
 EGLNativeWindowType NaomiHwcIntegration::createNativeWindow(QPlatformWindow *, const QSize &,
                                                             const QSurfaceFormat &)
 {
-    m_window = HWCNativeWindowCreate(m_size.width(), m_size.height(), HAL_PIXEL_FORMAT_RGBA_8888,
-                                     &NaomiHwcIntegration::presentCallback, this);
-    if (m_scaled && !m_blank) {
+    if (DeviceProfile::current().tablet)
+        m_window = new PipaNativeWindow(m_size, &NaomiHwcIntegration::presentCallback, this);
+    else
+        m_window = HWCNativeWindowCreate(m_size.width(), m_size.height(), HAL_PIXEL_FORMAT_RGBA_8888,
+                                         &NaomiHwcIntegration::presentCallback, this);
+    if (m_deviceLayer && !m_blank) {
         std::lock_guard<std::mutex> lock(m_hwcMutex);
         m_blank = blankFrame();
     }
@@ -360,7 +565,9 @@ ANativeWindowBuffer *NaomiHwcIntegration::blankFrame()
 // система, поэтому не удаляем.
 void NaomiHwcIntegration::destroyNativeWindow(EGLNativeWindowType)
 {
+    std::lock_guard<std::mutex> lock(m_hwcMutex);
     m_window = nullptr;
+    m_shown = nullptr;
 }
 
 void NaomiHwcIntegration::presentCallback(void *self, ANativeWindow *, ANativeWindowBuffer *buffer)
@@ -373,6 +580,14 @@ void NaomiHwcIntegration::presentCallback(void *self, ANativeWindow *, ANativeWi
 void NaomiHwcIntegration::presentBuffer(QPlatformSurface *)
 {
     QMetaObject::invokeMethod(&m_gui, [this] { frameSwapped(); }, Qt::QueuedConnection);
+}
+
+void NaomiHwcIntegration::requestFullFrame()
+{
+    QMetaObject::invokeMethod(&m_gui, [] {
+        for (QWindow *window : QGuiApplication::topLevelWindows())
+            QMetaObject::invokeMethod(window, "update");
+    }, Qt::QueuedConnection);
 }
 
 QEglFSWindow *NaomiHwcIntegration::createWindow(QWindow *window) const
@@ -433,6 +648,8 @@ void NaomiHwcIntegration::flushUpdates()
 // Малое питание: частоту в нём не трогаем (она — панели); после него, как и после выключения, — заново.
 bool NaomiHwcIntegration::setDisplayMode(int mode)
 {
+    if (mode == NaomiDisplayDoze && !DeviceProfile::current().pixel)
+        return false;
     std::lock_guard<std::mutex> lock(m_hwcMutex);
     if (mode == m_mode)
         return true;
@@ -445,8 +662,11 @@ bool NaomiHwcIntegration::setDisplayMode(int mode)
     }
     m_mode = mode;
     qCInfo(lcNaomiHwc, "дисплей %s", modeName(mode));
-    if (mode == NaomiDisplayOn)  // панель может вернуться на 60 Гц — заново, с проверкой замером
-        requestRefresh(m_targetHz ? m_targetHz : int(m_refreshHz.load()));
+    if (mode == NaomiDisplayOn) {  // панель может вернуться на 60 Гц — заново, с проверкой замером
+        // выбранная частота, а не текущая: экран гас в покое — m_targetHz там частота покоя
+        const int user = m_userHz.load();
+        m_requestHz = user ? user : m_defaultHz ? m_defaultHz : m_targetHz ? m_targetHz : int(m_refreshHz.load());
+    }
     return true;
 }
 
@@ -455,27 +675,44 @@ void NaomiHwcIntegration::present(ANativeWindowBuffer *buffer)
 {
     std::lock_guard<std::mutex> lock(m_hwcMutex);
     const int acquire = HWCNativeBufferGetFence(buffer);  // готовность отрисовки (GPU)
-    if (m_mode == NaomiDisplayOff) {  // дисплей выключен: кадр не выводим, буфер сразу свободен; панель не держит ни один
-        if (acquire >= 0)
-            close(acquire);
-        HWCNativeBufferSetFence(buffer, -1);
+    if (m_mode == NaomiDisplayOff) {  // буфер вернётся EGL с меткой завершения GPU
         m_shown = nullptr;
         return;
     }
+    const bool tablet = DeviceProfile::current().tablet;
+    if (tablet && (!buffer->handle || buffer->width != m_panel.width() || buffer->height != m_panel.height()
+                   || buffer->stride < buffer->width || buffer->format != HAL_PIXEL_FORMAT_RGBA_8888))
+        qFatal("naomi.hwc: неверный client target pipa: %dx%d, stride %d, format 0x%x",
+               buffer->width, buffer->height, buffer->stride, buffer->format);
+    if (tablet && buffer == m_shown)
+        qFatal("naomi.hwc: pipa повторно выдала буфер, который composer ещё не освободил");
+    if (tablet && !m_presented)
+        qCInfo(lcNaomiHwc, "client target pipa %dx%d, stride %d, RGBA8888, usage 0x%llx",
+               buffer->width, buffer->height, buffer->stride, static_cast<unsigned long long>(buffer->usage));
+    // libhybris передаёт владение копией fence в Android. Если кадр отброшен, оригинал остаётся у EGL.
+    auto submit = [&](auto setter) {
+        const int fd = acquire < 0 ? -1 : fcntl(acquire, F_DUPFD_CLOEXEC, 0);
+        if (acquire >= 0 && fd < 0) {
+            qCWarning(lcNaomiHwc, "не скопировать acquire fence: %s", strerror(errno));
+            return false;
+        }
+        const auto err = setter(fd);
+        if (err != HWC2_ERROR_NONE)
+            qCWarning(lcNaomiHwc, "буфер HWC2: ошибка %d", err);
+        return err == HWC2_ERROR_NONE;
+    };
     // Кадр меньше панели — слой DEVICE: буфер и его готовность — слою (до validate: composer выбирает по нему). Вид
     // слоя — заново каждый кадр: сразу после перезагрузки телефона composer на первый кадр просит «составлю сам»
     // (CLIENT), и accept_changes делал слой клиентским навсегда — экран оставался чёрным
-    if (m_scaled) {
+    if (m_deviceLayer) {
         hwc2_compat_layer_set_composition_type(m_layer, HWC2_COMPOSITION_DEVICE);
-        hwc2_compat_layer_set_buffer(m_layer, 0, buffer, acquire);
+        if (!submit([&](int fd) { return hwc2_compat_layer_set_buffer(m_layer, 0, buffer, fd); }))
+            return;
     }
     uint32_t types = 0, requests = 0;
     hwc2_error_t err = hwc2_compat_display_validate(m_display, &types, &requests);
     if (err != HWC2_ERROR_NONE && err != HWC2_ERROR_HAS_CHANGES) {
         qCWarning(lcNaomiHwc, "validate: ошибка %d", err);
-        if (acquire >= 0 && !m_scaled)
-            close(acquire);
-        HWCNativeBufferSetFence(buffer, -1);
         return;
     }
     // Отказ (хочет составлять сам): после перезагрузки телефона composer так отвечает, пока не покажет хоть один
@@ -485,7 +722,7 @@ void NaomiHwcIntegration::present(ANativeWindowBuffer *buffer)
     // после буфера 720 × 1560 смеситель дисплея становился 720 × 1560, место слоя (вся панель) обрезалось по нему, и
     // на экране был левый верхний угол картинки в 1,5 раза крупнее — до конца работы composer (16 ноября 2026, журнал
     // драйвера: смеситель 2 × 360 × 1560, из кадра — 480 × 1040; docs/DISPLAY.md, «Кадр меньше панели»)
-    const bool refused = m_scaled && types;
+    const bool refused = m_deviceLayer && types;
     if (refused) {
         ++m_refusedSec;
         if (!std::exchange(m_refusing, true))
@@ -498,34 +735,42 @@ void NaomiHwcIntegration::present(ANativeWindowBuffer *buffer)
         m_refusedSec = 0;
         m_refusedFrom = now;
     }
-    if (refused && !m_blank) {   // чёрного кадра нет (в журнале — «чёрного кадра нет») — экран останется чёрным
-        HWCNativeBufferSetFence(buffer, -1);
+    if (refused && !m_blank)
         return;
+    if (err == HWC2_ERROR_HAS_CHANGES || types || requests) {
+        err = hwc2_compat_display_accept_changes(m_display);
+        if (err != HWC2_ERROR_NONE) {
+            qCWarning(lcNaomiHwc, "acceptChanges: ошибка %d", err);
+            return;
+        }
     }
-    if (types || requests)
-        hwc2_compat_display_accept_changes(m_display);
-    if (!m_scaled)
-        hwc2_compat_display_set_client_target(m_display, 0, buffer, acquire, HAL_DATASPACE_UNKNOWN);
-    else if (refused)
-        hwc2_compat_display_set_client_target(m_display, 0, m_blank, -1, HAL_DATASPACE_UNKNOWN);
-    if (m_scaled && !refused && std::exchange(m_refusing, false))
+    if (!m_deviceLayer && !submit([&](int fd) {
+            return hwc2_compat_display_set_client_target(m_display, 0, buffer, fd, HAL_DATASPACE_UNKNOWN);
+        }))
+        return;
+    if (refused && hwc2_compat_display_set_client_target(m_display, 0, m_blank, -1, HAL_DATASPACE_UNKNOWN)
+                       != HWC2_ERROR_NONE)
+        return;
+    if (m_deviceLayer && !refused && std::exchange(m_refusing, false))
         qCInfo(lcNaomiHwc, "composer снова берёт слой с растяжением");
     int32_t presentFence = -1;
     err = hwc2_compat_display_present(m_display, &presentFence);
-    if (err != HWC2_ERROR_NONE)
+    if (err != HWC2_ERROR_NONE) {
         qCWarning(lcNaomiHwc, "present: ошибка %d", err);
+        if (presentFence >= 0)
+            close(presentFence);
+        return;
+    }
     if (refused) {
-        // кадр Qt не показан — его буфер свободен сразу; прошлый показанный — когда панель покажет чёрный
-        HWCNativeBufferSetFence(buffer, -1);
-        if (m_shown && m_shown != buffer)
-            HWCNativeBufferSetFence(m_shown, presentFence >= 0 ? dup(presentFence) : -1);
+        // Кадр Qt вернётся с acquire. Прошлый показанный — когда панель покажет чёрный.
+        if (m_shown && m_shown != buffer) {
+            HWCNativeBufferSetFence(m_shown, presentFence);
+            presentFence = -1;
+        }
         m_shown = nullptr;
         if (presentFence >= 0)
             close(presentFence);
-        QMetaObject::invokeMethod(qApp, [] {   // QQuickWindow::update — полный кадр, даже если сцена та же
-            for (QWindow *w : QGuiApplication::topLevelWindows())
-                QMetaObject::invokeMethod(w, "update");
-        }, Qt::QueuedConnection);
+        requestFullFrame();
         return;
     }
 
@@ -538,23 +783,44 @@ void NaomiHwcIntegration::present(ANativeWindowBuffer *buffer)
     // composer вместе с ним. Слой DEVICE (кадр меньше панели) получает свою метку — она и есть «прошлый буфер
     // отпущен» (по HWC2 метка present относится к буферу, который этот кадр сменил); нет её — та же present fence.
     int32_t release = -1;
-    if (m_scaled) {
+    if (m_deviceLayer) {
         hwc2_compat_out_fences_t *fences = nullptr;
         if (hwc2_compat_display_get_release_fences(m_display, &fences) == HWC2_ERROR_NONE && fences) {
             release = hwc2_compat_out_fences_get_fence(fences, m_layer);
             hwc2_compat_out_fences_destroy(fences);
         }
     }
-    if (m_shown && m_shown != buffer)
-        HWCNativeBufferSetFence(m_shown, release >= 0 ? release : presentFence >= 0 ? dup(presentFence) : -1);
-    else if (release >= 0)
+    if (m_shown && m_shown != buffer) {
+        if (release < 0 && presentFence >= 0) {
+            release = fcntl(presentFence, F_DUPFD_CLOEXEC, 0);
+            if (release < 0)
+                release = std::exchange(presentFence, -1);   // повторное использование буфера важнее счётчика
+        }
+        HWCNativeBufferSetFence(m_shown, release);
+    } else if (release >= 0) {
         close(release);
+    }
+    if (acquire >= 0)
+        close(acquire);
     HWCNativeBufferSetFence(buffer, -1);
     m_shown = buffer;
     if (presentFence >= 0)
         m_timer.add(presentFence);
-    if (++m_presented >= 2 && m_mode == NaomiDisplayOn)   // в малом питании частота — панели
+    else if (tablet && !m_presented)
+        qCWarning(lcNaomiHwc, "первый кадр pipa: HAL вернул present без fence");
+    ++m_presented;
+    if (m_mode != NaomiDisplayOn)
+        return;  // в малом питании частота — панели
+    if (m_presented >= 2) {
+        timespec now;
+        clock_gettime(CLOCK_MONOTONIC, &now);
+        driveIdle(int64_t(now.tv_sec) * 1000000000 + now.tv_nsec);
         driveRefresh();
+        if (tablet && m_switch != Switch::Idle && m_framesSinceSwitch < kSettleFrames + kMeasureIntervals)
+            requestFullFrame();
+    } else if (m_requestHz.load()) {
+        requestFullFrame();
+    }
 }
 
 QFunctionPointer NaomiHwcIntegration::platformFunction(const QByteArray &function) const
@@ -563,8 +829,10 @@ QFunctionPointer NaomiHwcIntegration::platformFunction(const QByteArray &functio
         return QFunctionPointer(&frameSnapshot);
     if (function == kNaomiDisplaySizes)
         return QFunctionPointer(&displaySizes);
-    if (function == kNaomiSetRefresh)
+    if (function == kNaomiSetRefresh && m_setConfigSym && !m_modes.isEmpty())
         return QFunctionPointer(&::requestRefresh);
+    if (function == kNaomiRefreshRates && m_setConfigSym)
+        return QFunctionPointer(&::refreshRates);
     if (function == kNaomiSetDisplayMode)
         return QFunctionPointer(&::setDisplayMode);
     return nullptr;

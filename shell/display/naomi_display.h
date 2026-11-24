@@ -17,7 +17,8 @@ struct NaomiFrameSnapshot {
 };
 
 using NaomiFrameSnapshotFn = void (*)(NaomiFrameSnapshot *out);
-using NaomiSetRefreshFn = bool (*)(int hz);  // 60 или 90; true — заявка принята
+using NaomiSetRefreshFn = bool (*)(int hz);  // режим панели; true — заявка принята
+using NaomiRefreshRatesFn = int (*)(int *out, int capacity);   // nullptr — узнать длину
 // Режим панели (docs/DISPLAY.md, «Малое питание»): выключена — кадры не выводятся; включена — частота
 // восстанавливается; малое питание (doze composer HAL) — кадры выводятся, частота (≈ 30 Гц) и яркость (две
 // ступени) — панели. Composer применяет режим со следующим выведенным кадром: после смены нужен кадр.
@@ -29,10 +30,12 @@ using NaomiSetDisplayModeFn = bool (*)(int mode);
 struct NaomiDisplaySizes {
     int renderWidth, renderHeight;
     int panelWidth, panelHeight;
+    int sceneRotation;
 };
 using NaomiDisplaySizesFn = void (*)(NaomiDisplaySizes *out);
 
 inline constexpr const char kNaomiFrameSnapshot[] = "naomi_frame_snapshot";
 inline constexpr const char kNaomiDisplaySizes[] = "naomi_display_sizes";
 inline constexpr const char kNaomiSetRefresh[] = "naomi_set_refresh";
+inline constexpr const char kNaomiRefreshRates[] = "naomi_refresh_rates";
 inline constexpr const char kNaomiSetDisplayMode[] = "naomi_set_display_mode";

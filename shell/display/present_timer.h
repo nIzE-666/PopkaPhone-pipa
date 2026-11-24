@@ -43,6 +43,7 @@ private:
     bool m_log = false;
     bool m_logDrops = false;
     int64_t m_lastLog = 0;
+    uint64_t m_loggedDrops = 0;   // пропусков на момент прошлой строки сводки (logSecond)
     int64_t m_dropAt = 0;               // метка кадра после пропуска, ждём кадры за ним для журнала
     int m_afterDrop = 0;
 };

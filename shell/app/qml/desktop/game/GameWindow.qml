@@ -26,6 +26,7 @@ Item {
     property string label                 // NES
     property string glyph: "gamepad"      // значок на полосе
     property bool active: false
+    property bool pinned: false
     property bool minimized: false
     property bool maximized: false
     property bool panelMode: false
@@ -34,6 +35,7 @@ Item {
     // тень и не скругляет углы — рисует он процессором, и на это уходила треть кадра (два лишних прохода по всему окну).
     // Тень стол и так не показывал, углы скругляет сам (WebSurface: outline, corner)
     property bool alwaysMaximized: false
+    property bool naomiInput: false       // программа со своим модулем ввода naomi (naomi-web --app: org.naomi.Input.p<pid>)
     property rect box                     // рамка окна с полосой (не развёрнутого)
     readonly property bool game: true     // для стола: кнопки режима дока — на панели (Desktop.qml, panelTop)
     signal activated()
@@ -52,8 +54,19 @@ Item {
     function activate() { activated() }
     function takeFocus() { if (view.surface) view.takeFocus() }
     property alias surfaceItem: view      // поверхность: ей клавиши кнопок геймпада (naomiPadKeys, Desktop.qml)
+    property alias touchScrollSpeed: view.touchScrollSpeed
     function togglePanel() { panelToggled() }
     function closeButton(mods) { closeClicked() }
+    function snapHalf(right) {
+        if (!area)
+            return
+        if (panelMode)
+            panelToggled()
+        maximized = false
+        const half = Math.floor(area.width / 2)
+        box = Qt.rect(right ? area.width - half : 0, 0, half, area.height)
+        saveRequested()
+    }
     property bool closing: false
     function dragOver(p) {}
     function dropAt(p, paths) {}
@@ -166,9 +179,12 @@ Item {
             // клавиши — клавиатурой Wayland (stream_input.cpp): игре приставки — по месту клавиши, кнопками
             // геймпада; программе Windows — вся клавиатура с Shift и прочим, тем же путём, что окну Android
             property bool gameKeys: !screen.program
-            property bool androidKeys: screen.program
-            property bool textCommit: win.system === "app"
+            property bool androidKeys: screen.program && !win.naomiInput
+            property bool textCommit: win.system === "app" && !win.naomiInput
+            // Linux desktop apps receive touch taps as pointer clicks and swipes as wheel events.
+            touchToPointer: win.system === "app"
             pointerFrames: win.system === "app"   // колесо Chromium — с wl_pointer.frame (web_surface.h)
+            onPointerPressed: win.activate()
             opaque: screen.program   // кадры Wine и Chromium — без прозрачности (web_surface.h); до shellSurface
             shellSurface: win.xdgSurface
             moveItem: Item {}
@@ -241,7 +257,7 @@ Item {
         Text {
             id: name
             x: 46
-            width: Math.min(implicitWidth, Math.max(0, panelButton.x - DeskStyle.webGrabGap - x - tag.implicitWidth - 12))
+            width: Math.min(implicitWidth, Math.max(0, pinBtn.x - DeskStyle.webGrabGap - x - tag.implicitWidth - 12))
             height: DeskStyle.webBarH
             verticalAlignment: Text.AlignVCenter
             elide: Text.ElideRight
@@ -253,7 +269,7 @@ Item {
         Text {
             id: tag
             x: name.x + name.width + 12
-            visible: x + implicitWidth <= panelButton.x - DeskStyle.webGrabGap
+            visible: x + implicitWidth <= pinBtn.x - DeskStyle.webGrabGap
             height: DeskStyle.webBarH
             verticalAlignment: Text.AlignVCenter
             text: win.label
@@ -264,15 +280,40 @@ Item {
         }
 
         WinButton {
+            id: pinBtn
+            visible: DeskStyle.tablet
+            x: DeskStyle.tablet ? splitLeftBtn.x - 2 - width : panelButton.x
+            y: (DeskStyle.webBarH - height) / 2
+            glyph: "pin"
+            active: win.pinned
+            onClicked: { win.pinned = !win.pinned; win.activate() }
+        }
+        WinButton {
+            id: splitLeftBtn
+            visible: DeskStyle.tablet
+            x: DeskStyle.tablet ? splitRightBtn.x - 2 - width : panelButton.x
+            y: (DeskStyle.webBarH - height) / 2
+            glyph: "split-left"
+            onClicked: win.snapHalf(false)
+        }
+        WinButton {
+            id: splitRightBtn
+            visible: DeskStyle.tablet
+            x: DeskStyle.tablet ? panelButton.x - 2 - width : panelButton.x
+            y: (DeskStyle.webBarH - height) / 2
+            glyph: "split-right"
+            onClicked: win.snapHalf(true)
+        }
+        WinButton {
             id: panelButton
-            x: win.width - 6 - 2 * 30 - 2; y: 5
+            x: win.width - 8 - 2 * width; y: (DeskStyle.webBarH - height) / 2
             glyph: "panel"
             unit: 0.9545
             line: 1.5
             onClicked: win.panelToggled()
         }
         WinButton {
-            x: win.width - 6 - 30; y: 5
+            x: win.width - 6 - width; y: (DeskStyle.webBarH - height) / 2
             glyph: "close"
             danger: true
             unit: 5.25 / 4.5

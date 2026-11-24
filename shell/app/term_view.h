@@ -65,6 +65,7 @@ public:
     Q_INVOKABLE void paste();
     Q_INVOKABLE void clearSelection();
     Q_INVOKABLE void insert(const QString &text) { sendPaste(text); }   // как вставку: пути файлов, брошенных в окно
+    Q_INVOKABLE void sendRaw(const QString &seq) { send(seq.toUtf8()); }   // спецклавиши сенсорной панели (Esc, Tab, Ctrl+C, стрелки)
 
     static constexpr qreal kPadX = 12;
     static constexpr qreal kPadY = 8;
@@ -90,6 +91,8 @@ protected:
     void mouseReleaseEvent(QMouseEvent *e) override;
     void mouseDoubleClickEvent(QMouseEvent *e) override;
     void wheelEvent(QWheelEvent *e) override;
+    void touchEvent(QTouchEvent *e) override;
+    void touchUngrabEvent() override;
     void focusInEvent(QFocusEvent *e) override;
     void focusOutEvent(QFocusEvent *e) override;
 
@@ -145,4 +148,15 @@ private:
     QElapsedTimer m_doubleAt;         // для тройного щелчка
     int m_mouseButton = -1;           // какая кнопка нажата у программы (режим мыши)
     double m_wheel = 0;
+
+    // Сенсорное управление на планшете: свайп — прокрутка, удержание — меню, щипок — масштаб шрифта
+    void resetTouch();
+    int m_touchId = -1;
+    QPointF m_touchStart;
+    QPointF m_touchLast;
+    bool m_touchScrolled = false;
+    bool m_touchLongFired = false;
+    double m_touchAltAcc = 0;
+    qreal m_pinchDist = 0;
+    QTimer m_longPressTimer;
 };

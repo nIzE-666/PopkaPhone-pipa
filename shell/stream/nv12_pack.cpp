@@ -28,10 +28,14 @@ uniform int nvStride;    // строка NV12, байт
 uniform int yScan;       // начало цветности, строк NV12
 uniform int pitch;       // строка цели, байт
 uniform bool flipY;
+uniform int rotation;
 out vec4 o;
 
 vec3 rgb(vec2 px) {      // px — точка кадра потока в пикселях (центр пикселя — .5)
     vec2 uv = px / vec2(size);
+    if (rotation == 90) uv = vec2(1.0 - uv.y, uv.x);
+    if (rotation == 180) uv = 1.0 - uv;
+    if (rotation == 270) uv = vec2(uv.y, 1.0 - uv.x);
     if (flipY) uv.y = 1.0 - uv.y;
     return texture(src, uv).rgb;
 }
@@ -70,9 +74,13 @@ uniform highp sampler2D src;
 uniform vec2 inv;        // 1 / размер кадра потока
 uniform float yScan;     // начало цветности, строк
 uniform bool flipY;
+uniform int rotation;
 out vec4 o;
 vec3 rgb(float x, float y) {   // точка кадра потока в пикселях (центр пикселя — .5)
     vec2 uv = vec2(x, y) * inv;
+    if (rotation == 90) uv = vec2(1.0 - uv.y, uv.x);
+    if (rotation == 180) uv = 1.0 - uv;
+    if (rotation == 270) uv = vec2(uv.y, 1.0 - uv.x);
     if (flipY) uv.y = 1.0 - uv.y;
     return texture(src, uv).rgb;
 }
@@ -138,7 +146,7 @@ static GLuint build(const char *fragment, const char *tail = nullptr)
     return program;
 }
 
-bool Nv12Packer::init(int w, int h, int nvStride, int yScan, size_t size, int pitch)
+bool Nv12Packer::init(int w, int h, int nvStride, int yScan, size_t size, int pitch, int rotation)
 {
     m_pitch = pitch;
     m_rows = int((size + size_t(pitch) * 4 - 1) / (size_t(pitch) * 4));   // строк цели под весь кадр NV12
@@ -160,6 +168,7 @@ bool Nv12Packer::init(int w, int h, int nvStride, int yScan, size_t size, int pi
                 glUniform1i(glGetUniformLocation(program, "src"), 0);
                 glUniform2f(glGetUniformLocation(program, "inv"), 1.0f / float(w), 1.0f / float(h));
                 glUniform1f(glGetUniformLocation(program, "yScan"), float(yScan));
+                glUniform1i(glGetUniformLocation(program, "rotation"), rotation);
             }
             m_lumaFlip = glGetUniformLocation(m_luma, "flipY");
             m_chromaFlip = glGetUniformLocation(m_chroma, "flipY");
@@ -171,6 +180,7 @@ bool Nv12Packer::init(int w, int h, int nvStride, int yScan, size_t size, int pi
     glUniform1i(glGetUniformLocation(m_program, "nvStride"), nvStride);
     glUniform1i(glGetUniformLocation(m_program, "yScan"), yScan);
     glUniform1i(glGetUniformLocation(m_program, "pitch"), pitch * 4);
+    glUniform1i(glGetUniformLocation(m_program, "rotation"), rotation);
     m_uFlip = glGetUniformLocation(m_program, "flipY");
     glUseProgram(0);
     glGenVertexArrays(1, &m_vao);

@@ -282,7 +282,7 @@ FocusScope {
         id: caption
         z: 50
         readonly property rect f: win.shownFrame   // рамка окна; «развернуть» — в движении
-        readonly property real h: 43   // полоса Android — 64 пикселя, 42,7 точки стола: закрыта целиком
+        readonly property real h: Math.max(43, DeskStyle.webBarH)
         visible: win.shown && f.width > 0 && !win.panelMode   // на весь экран — без полосы (её кнопки — на панели)
         x: f.x; y: f.y
         width: f.width; height: h
@@ -313,14 +313,14 @@ FocusScope {
             onDoubleClicked: mover.toggleMaximized()
         }
         WinButton {   // на весь экран — как у браузера: кнопка переезжает на панель стола
-            x: caption.width - 6 - 2 * 30 - 2; y: (caption.h - 30) / 2
+            x: caption.width - 8 - 2 * width; y: (caption.h - height) / 2
             glyph: "panel"
             unit: 0.9545
             line: 1.5
             onClicked: win.togglePanel()
         }
         WinButton {
-            x: caption.width - 6 - 30; y: (caption.h - 30) / 2
+            x: caption.width - 6 - width; y: (caption.h - height) / 2
             glyph: "close"
             danger: true
             unit: 5.25 / 4.5

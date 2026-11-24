@@ -1,6 +1,7 @@
 #include "system_monitor.h"
 
 #include "desktop_screen.h"
+#include "device_profile.h"
 
 #include <QDir>
 #include <QFile>
@@ -72,7 +73,12 @@ void SystemMonitor::setActive(bool on)
     if (m_desk)
         m_desk->setPulse(on);
     if (on) {
-        if (m_skinPath.isEmpty()) {   // зоны тепла — по именам, один раз
+        const auto &profile = DeviceProfile::current();
+        if (profile.tablet) {
+            const auto paths = profile.thermalPaths();
+            m_skinPath = paths.skin;
+            m_cpuZones = paths.cpu;
+        } else if (m_skinPath.isEmpty()) {   // зоны тепла — по именам, один раз
             const QDir zones(QStringLiteral("/sys/class/thermal"));
             for (const QString &z : zones.entryList({QStringLiteral("thermal_zone*")}, QDir::Dirs)) {
                 const QByteArray type = slurp(zones.filePath(z + "/type")).trimmed();
@@ -165,10 +171,11 @@ void SystemMonitor::sample(bool first)
     // тепло
     const double skin = slurp(m_skinPath).trimmed().toDouble() / 1000.0;
     now["skin"] = skin;
-    now["chip"] = slurp(m_chipPath).trimmed().toDouble() / 1000.0;
+    now["chip"] = m_cpuZones.isEmpty() ? slurp(m_chipPath).trimmed().toDouble() / 1000.0 : maxTemperature(m_cpuZones);
     bool hot = false;
-    for (const char *policy : {"policy6", "policy7"}) {
-        const QString base = QStringLiteral("/sys/devices/system/cpu/cpufreq/%1/").arg(QLatin1String(policy));
+    const auto &clusters = DeviceProfile::current().clusters;
+    for (const auto &cluster : {clusters[1], clusters[2]}) {
+        const QString base = QStringLiteral("/sys/devices/system/cpu/cpufreq/policy%1/").arg(cluster.firstCpu);
         const qint64 cap = slurp(base + "scaling_max_freq").trimmed().toLongLong();
         hot = hot || (cap > 0 && cap < slurp(base + "cpuinfo_max_freq").trimmed().toLongLong());
     }

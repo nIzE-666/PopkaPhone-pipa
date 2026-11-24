@@ -272,11 +272,22 @@ QStringList FilesService::wallpapers() const
 QString FilesService::wallpaper() const
 {
     const QString name = QSettings(wallConf(), QSettings::IniFormat).value("current").toString();
-    if (name == "-")
+    const QString file = deskDir() + "/wallpaper.jpg";
+    const QFileInfo info(file);
+    if (name == "-" || !info.isFile() || !info.isReadable())
         return {};
     if (name.isEmpty())   // не выбирали в «Настройках» — та, что стоит
-        return deskDir() + "/wallpaper.jpg";
+        return file;
     return wallDir() + "/" + name;
+}
+
+QUrl FilesService::desktopWallpaper() const
+{
+    if (wallpaper().isEmpty())
+        return {};
+    QUrl url = QUrl::fromLocalFile(deskDir() + "/wallpaper.jpg");
+    url.setQuery(QString::number(m_wallpaperVersion));
+    return url;
 }
 
 void FilesService::setWallpaper(const QString &path)

@@ -1,0 +1,103 @@
+#!/bin/sh
+# Xiaomi Pad 6 с One UI в _a и Ubuntu Touch в _b. Используется naomid и Android-приложением.
+set -eu
+export LC_ALL=C
+
+die() { printf '%s\n' "$*" >&2; exit 1; }
+
+is_android_pipa() {
+    for prop in ro.product.vendor.device ro.product.odm.device ro.product.device; do
+        [ "$(getprop "$prop")" = pipa ] && return 0
+    done
+    for path in /proc/device-tree/model /sys/firmware/devicetree/base/model; do
+        if [ -r "$path" ]; then
+            case "$(tr -d '\000' < "$path")" in
+                *'xiaomi pipa'|'Xiaomi Pad 6') return 0 ;;
+            esac
+        fi
+    done
+    return 1
+}
+
+query() {
+    timeout -k 1s 3s "$@"
+}
+
+check_slot() {
+    [ "$(query "$@" get-number-slots)" = 2 ] || die 'Boot Control не подтвердил два загрузочных слота.'
+    [ "$(query "$@" get-current-slot)" = "$source_index" ] \
+        || die "Переключение доступно из $source_system в слоте $source_suffix."
+    [ "$(query "$@" get-suffix "$target_index")" = "$target_suffix" ] \
+        || die "Boot Control не подтвердил слот $target_suffix для $target_system."
+    query "$@" is-slot-bootable "$target_index" >/dev/null \
+        || die "Слот $target_suffix с $target_system помечен как незагрузочный или недоступен."
+
+    merge=$(query "$@" get-snapshot-merge-status) || die 'Не удалось проверить состояние обновления Android.'
+    case "$merge" in
+        none|cancelled) ;;
+        merging|snapshotted) die 'Сначала завершите обновление Android. Оно использует загрузочные слоты.' ;;
+        *) die 'Boot Control не определил состояние обновления Android.' ;;
+    esac
+}
+
+select_slot() {
+    check_slot "$@"
+    if active=$(query "$@" get-active-boot-slot 2>/dev/null); then
+        case "$active" in
+            0|1) ;;
+            *) die 'Boot Control сообщил неизвестный слот следующей загрузки.' ;;
+        esac
+        [ "$active" != "$target_index" ] || return 0
+    else
+        # У Boot Control 1.1 в One UI есть ответ setActiveBootSlot, но нет getActiveBootSlot.
+        [ "$source_index" = 0 ] &&
+            [ "$(query "$@" hal-info)" = 'HAL Version: android.hardware.boot@1.1::IBootControl' ] \
+            || die 'Не удалось узнать слот следующей загрузки.'
+        active=
+    fi
+    # Запись метаданных нельзя прерывать по таймеру чтения.
+    "$@" set-active-boot-slot "$target_index" >/dev/null \
+        || die "Boot Control не подтвердил выбор слота $target_suffix."
+    if [ -n "$active" ]; then
+        [ "$(query "$@" get-active-boot-slot)" = "$target_index" ] \
+            || die "Не удалось подтвердить слот $target_suffix после переключения."
+    fi
+}
+
+main() {
+    [ "$#" = 1 ] || die 'Нужен режим one-ui или ubuntu-touch.'
+    [ "$(id -u)" = 0 ] || die 'Для выбора загрузочного слота нужен root-доступ.'
+
+    case "$1" in
+        one-ui)
+            source_index=1 source_suffix=_b source_system='Ubuntu Touch'
+            target_index=0 target_suffix=_a target_system='One UI'
+            select_slot lxc-attach -n android --clear-env -- /system/bin/bootctl
+            SYSTEMCTL_SKIP_AUTO_KEXEC=1 SYSTEMCTL_SKIP_AUTO_SOFT_REBOOT=1 systemctl --no-block reboot \
+                || die 'Слот _a с One UI уже выбран. Systemd отклонил запрос перезагрузки.'
+            ;;
+        ubuntu-touch|check-ubuntu-touch)
+            mode=$1
+            source_index=0 source_suffix=_a source_system='One UI'
+            target_index=1 target_suffix=_b target_system='Ubuntu Touch'
+            is_android_pipa || die 'Устройство Xiaomi Pad 6 (pipa) не подтверждено.'
+            if boot_control=$(command -v bootctl); then
+                set -- "$boot_control"
+            else
+                [ -f "${NAOMI_BOOT_SWITCH_APK:-}" ] || die 'Для перехода нужен Boot Control в One UI.'
+                set -- /system/bin/env "CLASSPATH=$NAOMI_BOOT_SWITCH_APK" /system/bin/app_process /system/bin \
+                    com.popka.naomiphone.bootswitch.BootControl
+            fi
+            if [ "$mode" = check-ubuntu-touch ]; then
+                check_slot "$@"
+                return
+            fi
+            select_slot "$@"
+            reboot || die 'Слот _b с Ubuntu Touch уже выбран. Android отклонил запрос перезагрузки.'
+            printf '%s\n' 'UBUNTU_TOUCH_REBOOT_REQUESTED'
+            ;;
+        *) die 'Нужен режим one-ui или ubuntu-touch.' ;;
+    esac
+}
+
+main "$@"

@@ -78,6 +78,14 @@ AndroidApps::AndroidApps(const QString &waylandSocket, QObject *parent)
     });
     m_sleepTimer.setSingleShot(true);
     connect(&m_sleepTimer, &QTimer::timeout, this, [this] { sleep(true); });
+    m_idleStopTimer.setSingleShot(true);
+    connect(&m_idleStopTimer, &QTimer::timeout, this, [this] {
+        if (m_state == State::On && !m_windows && m_pending.isEmpty()) {
+            qCInfo(lcAndroid, "Android без окон в простое — останавливаю сессию для экономии батареи");
+            setState(State::Stopping);
+            stop();
+        }
+    });
     connect(&m_dirWatch, &QFileSystemWatcher::directoryChanged, this, [this] { m_reread.start(); });
     QDir().mkpath(m_appsDir);
     m_dirWatch.addPath(m_appsDir);
@@ -139,6 +147,7 @@ void AndroidApps::launch(const QString &pkg)
 {
     if (!m_installed || pkg.isEmpty())
         return;
+    m_idleStopTimer.stop();
     emit launching(pkg);
     m_launchedAt.insert(pkg, QDateTime::currentMSecsSinceEpoch());
     switch (m_state) {
@@ -240,11 +249,13 @@ void AndroidApps::androidReady()
     const QStringList pending = std::exchange(m_pending, {});
     for (const QString &pkg : pending)
         runWaydroid({QStringLiteral("app"), QStringLiteral("launch"), pkg});
+    updateIdleStop();
 }
 
 void AndroidApps::sessionGone()
 {
     m_startTimeout.stop();
+    m_idleStopTimer.stop();
     m_clients.clear();   // pid контейнера больше не наши
     if (m_frozen) {
         m_frozen = false;
@@ -400,7 +411,19 @@ void AndroidApps::setWindows(bool any)
     if (any == m_windows)
         return;
     m_windows = any;
+    updateIdleStop();
     emit windowsChanged();
+}
+
+void AndroidApps::updateIdleStop()
+{
+    const int sec = qEnvironmentVariableIsSet("NAOMI_ANDROID_IDLE_STOP_SEC")
+                        ? qEnvironmentVariableIntValue("NAOMI_ANDROID_IDLE_STOP_SEC")
+                        : 600;
+    if (sec > 0 && m_state == State::On && !m_windows && m_pending.isEmpty())
+        m_idleStopTimer.start(sec * 1000);
+    else
+        m_idleStopTimer.stop();
 }
 
 void AndroidApps::sleep(bool on)

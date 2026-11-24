@@ -1,4 +1,5 @@
 #include "power.h"
+#include "device_profile.h"
 
 #include <QFile>
 #include <QGuiApplication>
@@ -19,8 +20,6 @@
 Q_LOGGING_CATEGORY(lcPower, "naomi.power")
 
 namespace {
-const char kBacklight[] = "/sys/class/backlight/panel0-backlight/brightness";
-const char kBacklightMax[] = "/sys/class/backlight/panel0-backlight/max_brightness";
 // Контроллер касаний: после выключения экрана он сбрасывает настройки — фильтр движения снова
 // включён (docs/SHELL.md, «Касания»). Права на запись даёт shell-prepare (группа android_input).
 // В малом питании панели ядро усыпляет контроллер и отдаёт его сопроцессору датчиков (SLPI) — касания
@@ -76,7 +75,7 @@ const qreal kAodLevel = 0.3;   // по восприятию: подсветка 
 class BacklightWriter
 {
 public:
-    BacklightWriter() : m_thread([this] { run(); }) {}
+    explicit BacklightWriter(const QString &path) : m_path(path), m_thread([this] { run(); }) {}
     ~BacklightWriter()
     {
         {
@@ -105,15 +104,14 @@ private:
                 return;   // выход, всё записано
             const QByteArray value = QByteArray::number(std::exchange(m_value, -1));
             lock.unlock();
-            QFile f(kBacklight);
-            if (f.open(QIODevice::WriteOnly))
-                f.write(value);
-            else
-                qCWarning(lcPower, "нет доступа к яркости %s", kBacklight);
+            QFile f(m_path);
+            if (!f.open(QIODevice::WriteOnly | QIODevice::Unbuffered) || f.write(value) != value.size())
+                qCWarning(lcPower, "нет доступа к яркости %s", qPrintable(m_path));
             lock.lock();
         }
     }
 
+    const QString m_path;
     std::mutex m_mutex;
     std::condition_variable m_wake;
     int m_value = -1;
@@ -137,20 +135,30 @@ Power::Power()
           QGuiApplication::platformFunction(kNaomiSetDisplayMode)))
     , m_frameSnapshot(reinterpret_cast<NaomiFrameSnapshotFn>(
           QGuiApplication::platformFunction(kNaomiFrameSnapshot)))
+    , m_aodSupported(DeviceProfile::current().pixel)
+    , m_noIdleSleep(qEnvironmentVariableIntValue("NAOMI_NO_SLEEP") != 0)
     , m_settings("naomi", "shell")
-    , m_backlight(std::make_unique<BacklightWriter>())
 {
-    if (QFile f(kBacklightMax); f.open(QIODevice::ReadOnly))
-        m_maxBacklight = qMax(1, f.readAll().trimmed().toInt());
+    const auto &profile = DeviceProfile::current();
+    const QString backlight = profile.backlight();
+    m_maxBacklight = readDeviceFile(backlight + "max_brightness").toInt();
+    if (m_maxBacklight <= 0 && profile.pixel)
+        m_maxBacklight = 1023;
+    if (m_maxBacklight > 0)
+        m_backlight = std::make_unique<BacklightWriter>(backlight + "brightness");
+    else
+        qCWarning(lcPower, "не прочитать max_brightness в %s", qPrintable(backlight));
     m_manual = m_brightness = m_settings.value("display/brightness", 0.6).toReal();
-    m_auto = m_settings.value("display/auto", true).toBool();
+    m_auto = !profile.tablet && m_settings.value("display/auto", true).toBool();
     m_adjustKnown = m_settings.contains("display/autoAdjust");
     m_adjust = m_settings.value("display/autoAdjust", 0.0).toReal();
-    m_aod = m_settings.value("display/aod", false).toBool();
+    m_aod = aodSupported() && m_settings.value("display/aod", false).toBool();
     m_powerKey = m_settings.value("display/powerKey", "lock").toString();
-    m_aodDeep = m_settings.value("display/aodDeep", true).toBool();
+    if (!aodSupported() && m_powerKey == "aod")
+        m_powerKey = "lock";
+    m_aodDeep = aodSupported() && m_settings.value("display/aodDeep", true).toBool();
     const QByteArray env = qgetenv("NAOMI_SCREEN_TIMEOUT");
-    m_timeoutSec = env.isEmpty() ? m_settings.value("display/timeout", 60).toInt() : env.toInt();
+    m_timeoutSec = env.isEmpty() ? m_settings.value("display/timeout", profile.tablet ? 300 : 60).toInt() : env.toInt();
     if (const QByteArray deep = qgetenv("NAOMI_AOD_DEEP"); !deep.isEmpty())
         m_deepSec = qMax(0, deep.toInt());
     m_deepTimer.setSingleShot(true);
@@ -169,6 +177,8 @@ Power::Power()
     writeBacklight();
     m_aodCurve.addCubicBezierSegment(QPointF(0.4, 0), QPointF(0.2, 1), QPointF(1, 1));
 
+    if (!profile.pixel)
+        return;
     m_fingerFd = ::open(kFingerIrq, O_RDONLY | O_CLOEXEC);
     if (m_fingerFd < 0) {
         qCWarning(lcPower, "нет доступа к датчику отпечатка %s — из AOD будят только экран и кнопка", kFingerIrq);
@@ -216,6 +226,7 @@ void Power::sleep()
 
 void Power::sleepTo(bool aod)
 {
+    aod = aod && aodSupported();
     if (!aod || m_screen == Screen::Off) {
         setScreen(aod ? Screen::Aod : Screen::Off);
         return;
@@ -308,11 +319,17 @@ void Power::setAodAmount(qreal amount)
 
 void Power::setScreen(Screen screen)
 {
+    if (screen == Screen::Aod && !aodSupported())
+        screen = Screen::Off;
     if (screen == m_screen)
         return;
+    const bool tablet = DeviceProfile::current().tablet;
     const bool lit = screen != Screen::Off;   // AOD — та же включённая панель (малое питание — enterDeep)
-    if ((m_deep || (m_screen != Screen::Off) != lit) && m_setMode
+    // LCD pipa: выключаем подсветку, оставляя DSI и composer в ON. Кнопки и сеть остаются доступны.
+    if (!tablet && (m_deep || (m_screen != Screen::Off) != lit) && m_setMode
         && !m_setMode(lit ? NaomiDisplayOn : NaomiDisplayOff))
+        return;
+    if (tablet && !lit && !m_backlight)
         return;
     const bool wasDeep = std::exchange(m_deep, false);
     if (wasDeep) {   // контроллер касаний больше держать незачем
@@ -324,6 +341,8 @@ void Power::setScreen(Screen screen)
     const Screen was = m_screen;
     const bool wasDozing = dozing();
     m_screen = screen;
+    if (tablet && !lit)
+        m_backlight->set(0);
     qCInfo(lcPower, "экран %s", screen == Screen::On ? "включён" : screen == Screen::Aod ? "в AOD" : "выключен");
     if (was == Screen::Off) {
         if (screen == Screen::Aod) {   // в AOD не переходом (из выключенного) — сразу
@@ -412,7 +431,7 @@ void Power::moved()
 
 void Power::setAodDeep(bool on)
 {
-    if (on == m_aodDeep)
+    if (!aodSupported() || on == m_aodDeep)
         return;
     m_aodDeep = on;
     m_settings.setValue("display/aodDeep", on);
@@ -430,7 +449,7 @@ void Power::setAodDeep(bool on)
 
 void Power::setAod(bool on)
 {
-    if (on == m_aod)
+    if (!aodSupported() || on == m_aod)
         return;
     m_aod = on;
     m_settings.setValue("display/aod", on);
@@ -545,7 +564,7 @@ void Power::rampStep()
 void Power::setPowerKey(const QString &action)
 {
     static const QStringList known{"lock", "aod", "off", "none"};
-    const QString a = known.contains(action) ? action : QStringLiteral("lock");
+    const QString a = known.contains(action) && (aodSupported() || action != "aod") ? action : QStringLiteral("lock");
     if (a == m_powerKey)
         return;
     m_powerKey = a;
@@ -565,14 +584,19 @@ void Power::setScreenTimeout(int seconds)
 
 void Power::userActivity()
 {
-    if (m_screen == Screen::On && m_timeoutSec > 0)
+    if (!m_noIdleSleep && m_screen == Screen::On && m_timeoutSec > 0)
         m_idle.start(m_timeoutSec * 1000);
+    else
+        m_idle.stop();
 }
 
 // Яркость по восприятию: квадрат даёт ровный шаг ползунка; минимум 4 — экран не гаснет совсем.
 void Power::writeBacklight()
 {
-    const int value = 4 + int(std::lround((m_maxBacklight - 4) * m_brightness * m_brightness));
+    if (!m_backlight)
+        return;
+    const int minimum = qMin(m_maxBacklight, 4);
+    const int value = minimum + int(std::lround((m_maxBacklight - minimum) * m_brightness * m_brightness));
     m_backlight->set(value);
 }
 
@@ -586,6 +610,8 @@ void Power::applyTouchSettings()
 
 void Power::touchCommand(const char *command)
 {
+    if (!DeviceProfile::current().pixel)
+        return;
     QFile f(kTouchCmd);
     if (f.open(QIODevice::WriteOnly))
         f.write(command);
@@ -618,13 +644,17 @@ bool Power::eventFilter(QObject *, QEvent *event)
                 emit volumeKey(dir);
             return true;
         }
+        if (DeviceProfile::current().tablet && !awake()) {
+            wake();
+            return true;
+        }
         userActivity();
         break;
     }
     case QEvent::KeyRelease:
         return volumeDirection(static_cast<QKeyEvent *>(event)) != 0;
     case QEvent::TouchBegin:
-        if (dozing()) {   // касание будит (и по пути в AOD), но интерфейсу не идёт: под пальцем мог быть орган
+        if (dozing() || (DeviceProfile::current().tablet && !awake())) {
             m_wakeTouch = true;
             wake();
             return true;
@@ -643,7 +673,21 @@ bool Power::eventFilter(QObject *, QEvent *event)
             return true;
         break;
     case QEvent::MouseButtonPress:
+        if (DeviceProfile::current().tablet && !awake()) {
+            wake();
+            return true;
+        }
         userActivity();
+        break;
+    case QEvent::MouseMove:
+    case QEvent::Wheel:
+        if (DeviceProfile::current().tablet) {
+            if (!awake()) {
+                wake();
+                return true;
+            }
+            userActivity();
+        }
         break;
     default:
         break;

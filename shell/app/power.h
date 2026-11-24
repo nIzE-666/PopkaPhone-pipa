@@ -38,6 +38,7 @@ class Power : public QObject
     Q_PROPERTY(bool displayOn READ displayOn NOTIFY displayOnChanged)   // включён (не AOD и не выключен)
     Q_PROPERTY(bool dozing READ dozing NOTIFY dozingChanged)            // AOD на экране или переход к нему
     Q_PROPERTY(qreal aodAmount READ aodAmount NOTIFY aodAmountChanged)  // 0 — экран, 1 — AOD; между — переход
+    Q_PROPERTY(bool aodSupported READ aodSupported CONSTANT)
     Q_PROPERTY(bool aod READ aod WRITE setAod NOTIFY aodChanged)        // настройка: гасить в AOD
     Q_PROPERTY(bool aodDeep READ aodDeep WRITE setAodDeep NOTIFY aodDeepChanged)   // настройка: вторая ступень
     Q_PROPERTY(bool watchMotion READ watchMotion NOTIFY watchMotionChanged)        // нужен датчик движения
@@ -59,6 +60,7 @@ public:
     bool displayOn() const { return m_screen == Screen::On; }   // включён для работы (и по пути в AOD)
     bool dozing() const { return m_screen == Screen::Aod || m_toAod; }
     qreal aodAmount() const { return m_aodAmount; }
+    bool aodSupported() const { return m_aodSupported; }
     bool aod() const { return m_aod; }
     void setAod(bool on);
     bool aodDeep() const { return m_aodDeep; }
@@ -80,7 +82,7 @@ public:
 
     void setScreen(Screen screen);   // сразу, без перехода
     void wake();
-    void sleep();                    // погасить: в AOD (переходом), если он включён
+    Q_INVOKABLE void sleep();         // погасить: в AOD (переходом), если он включён
     void sleepTo(bool aod);          // погасить: в AOD (переходом) или выключить
     Q_INVOKABLE void moved();        // телефон сдвинули (naomid): в AOD — отсчёт до малого питания заново
 
@@ -122,6 +124,8 @@ private:
     NaomiSetDisplayModeFn m_setMode = nullptr;
     NaomiFrameSnapshotFn m_frameSnapshot = nullptr;   // частота панели — шаг хода перехода
     Screen m_screen = Screen::On;
+    const bool m_aodSupported;
+    const bool m_noIdleSleep;
     bool m_aod = false;
     bool m_wakeTouch = false;               // касание, разбудившее из AOD: до отпускания — не интерфейсу
     bool m_toAod = false;                   // идём в AOD или в нём
@@ -156,7 +160,7 @@ private:
     QElapsedTimer m_rampClock;
     qreal m_rampTarget = 0, m_rampRate = 0;
     int m_timeoutSec = 60;
-    int m_maxBacklight = 1023;
+    int m_maxBacklight = 0;
     QTimer m_idle;
     QSettings m_settings;
     std::unique_ptr<BacklightWriter> m_backlight;   // запись яркости — в своём потоке

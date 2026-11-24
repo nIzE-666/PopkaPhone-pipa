@@ -523,8 +523,11 @@ DeskWindow {
                      { label: "Очистить корзину", run: () => confirm.ask("empty", []) }]
         } else {
             items.push({ label: "Открыть", run: () => fw.openSelected() })
-            if (first.isDir && n === 1)
+            if (first.isDir && n === 1) {
                 items.push({ label: "Открыть в новом окне", run: () => fw.openWindow(first.path) })
+                if (desk && typeof desk.openTerminalAt === "function")
+                    items.push({ label: "Открыть в Терминале", run: () => desk.openTerminalAt(first.path) })
+            }
             items.push({ sep: true },
                        { label: naomiFiles.isStarred(first.path) ? "Убрать из избранного" : "В избранное",
                          run: () => naomiFiles.setStarred(paths, !naomiFiles.isStarred(first.path)) })
@@ -551,6 +554,8 @@ DeskWindow {
                 items.push({ label: "Отменить: " + naomiFiles.undoWhat.toLowerCase(), run: () => naomiFiles.undo() },
                            { sep: true })
             items.push({ label: "Новая папка", run: () => fw.newFolder() })
+            if (desk && typeof desk.openTerminalAt === "function")
+                items.push({ label: "Открыть папку в Терминале", run: () => desk.openTerminalAt(files.location) })
             if (naomiFiles.hasClipboard)
                 items.push({ label: "Вставить", run: () => fw.paste() })
             items.push({ sep: true },
@@ -671,20 +676,20 @@ DeskWindow {
     // ---------- полоса: назад, вперёд, путь; плитка / список ----------
     barContent: [
         WinButton {
-            x: 6; y: 5
+            x: 6; y: (fw.barH - height) / 2
             glyph: "back"
             enabled_: fw.backStack.length > 0
             onClicked: fw.goBack()
         },
         WinButton {
-            x: 38; y: 5
+            x: 8 + width; y: (fw.barH - height) / 2
             glyph: "forward"
             enabled_: fw.fwdStack.length > 0
             onClicked: fw.goForward()
         },
         Item {
             id: crumbsArea
-            x: 80
+            x: 20 + 2 * DeskStyle.windowButton
             width: parent.width - x - 12
             height: fw.barH
             clip: true
@@ -745,10 +750,10 @@ DeskWindow {
         },
         Loader {   // Ctrl+L — путь строкой
             id: pathEdit
-            x: 80
-            y: 5
+            x: 20 + 2 * DeskStyle.windowButton
+            y: (fw.barH - height) / 2
             width: parent.width - x - 12
-            height: 30
+            height: DeskStyle.windowButton
             active: false
             onLoaded: item.input.forceActiveFocus()
             sourceComponent: Rectangle {
@@ -794,9 +799,15 @@ DeskWindow {
         }
     ]
     barTools: [
+        WinButton {
+            visible: fw.realDir && desk && typeof desk.openTerminalAt === "function"
+            y: (fw.barH - height) / 2
+            glyph: "term"
+            onClicked: desk.openTerminalAt(files.location)
+        },
         Item { width: 2; height: 1 },
         WinButton {
-            y: 5
+            y: (fw.barH - height) / 2
             glyph: fw.listMode ? "grid" : "list"
             onClicked: fw.setMode(fw.listMode ? "grid" : "list")
         },

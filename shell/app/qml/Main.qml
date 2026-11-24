@@ -13,13 +13,20 @@ import Naomi.Shell
 ShellCompositor {
     id: compositor
     socketName: naomiWaylandSocket
+    property alias displayOutput: primaryOutput
 
     WaylandOutput {
-        sizeFollowsWindow: true
+        id: primaryOutput
+        sizeFollowsWindow: !naomiTablet
         window: Window {
-            visible: true
+            visible: !naomiTablet
             color: Theme.canvas
-            ShellView { id: shell; anchors.fill: parent }
+            Loader {
+                id: shell
+                anchors.fill: parent
+                active: !naomiTablet
+                sourceComponent: ShellView {}
+            }
         }
     }
 
@@ -29,10 +36,10 @@ ShellCompositor {
             const pid = xdgSurface.surface.client.processId
             if (naomiAndroid.isAndroid(pid))
                 naomiAndroid.window(toplevel, xdgSurface)
-            else if (naomiApps.onDesk(pid))
+            else if (naomiTablet || naomiApps.onDesk(pid))
                 naomiApps.deskWindow(toplevel, xdgSurface)
-            else
-                shell.addWindow(toplevel, xdgSurface)
+            else if (shell.item)
+                shell.item.addWindow(toplevel, xdgSurface)
         }
     }
     TextInputManager {}

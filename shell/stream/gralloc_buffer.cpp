@@ -1,10 +1,14 @@
 #include "gralloc_buffer.h"
 
 #include <GLES2/gl2ext.h>
+#include <linux/dma-buf.h>
+#include <sys/ioctl.h>
 #include <sys/mman.h>
 #include <unistd.h>
 
 #include <cstdio>
+#include <climits>
+#include <cstring>
 #include <vector>
 
 namespace {
@@ -67,6 +71,25 @@ bool grallocAllocateLinear(GrallocBuffer &b, size_t bytes, int widthHint, int us
     }
     fprintf(stderr, "gralloc: строка буфера так и не совпала с шириной\n");
     return false;
+}
+
+bool grallocAllocateExtra(GrallocBuffer &b, size_t bytes)
+{
+    if (bytes > INT_MAX || !grallocAllocate(b, int(bytes), 1, kGrallocBlob, kGrallocSwWriteOften | kGrallocHwVideoEncoder)
+        || b.size < bytes)
+        return false;
+    void *map = mmap(nullptr, bytes, PROT_WRITE, MAP_SHARED, b.fd, 0);
+    if (map == MAP_FAILED) {
+        perror("venus: mmap extradata");
+        return false;
+    }
+    dma_buf_sync sync{DMA_BUF_SYNC_START | DMA_BUF_SYNC_WRITE};
+    ioctl(b.fd, DMA_BUF_IOCTL_SYNC, &sync);
+    memset(map, 0, bytes);
+    sync.flags = DMA_BUF_SYNC_END | DMA_BUF_SYNC_WRITE;
+    ioctl(b.fd, DMA_BUF_IOCTL_SYNC, &sync);
+    munmap(map, bytes);
+    return true;
 }
 
 bool grallocBindGl(GrallocBuffer &b, EGLDisplay dpy)

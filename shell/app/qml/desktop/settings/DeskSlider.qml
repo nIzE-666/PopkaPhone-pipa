@@ -9,6 +9,7 @@ Item {
     property real to: 100
     property real stepSize: 1
     property real value: 0
+    property real touchMargin: 6
     signal moved(real value)
     height: 16
 
@@ -25,9 +26,9 @@ Item {
     }
     MouseArea {
         anchors.fill: parent
-        anchors.margins: -6
+        anchors.margins: -s.touchMargin
         function at(mx) {
-            const u = Math.max(0, Math.min(1, (mx - 6) / s.width))
+            const u = Math.max(0, Math.min(1, (mx - s.touchMargin) / s.width))
             const v = Math.round((s.from + u * (s.to - s.from)) / s.stepSize) * s.stepSize
             if (v !== s.value)
                 s.moved(v)

@@ -11,38 +11,36 @@ namespace {
 
 const char UPOWER[] = "org.freedesktop.UPower";
 const char DISPLAY_DEVICE[] = "/org/freedesktop/UPower/devices/DisplayDevice";
-const char BATTERY[] = "/sys/class/power_supply/battery/";
-const char USB[] = "/sys/class/power_supply/usb/";
 const char HISTORY[] = "/var/lib/upower";
-
-QByteArray readSys(const QString &path)
-{
-    QFile f(path);
-    return f.open(QIODevice::ReadOnly) ? f.readAll().trimmed() : QByteArray();
-}
 
 qint64 sysNum(const QString &path)
 {
-    return readSys(path).toLongLong();
+    return readDeviceFile(path).toLongLong();
 }
 
 } // namespace
 
 Battery::Battery(QObject *parent)
     : BusObject("/org/naomi/Phone/Battery", "org.naomi.Phone.Battery", parent)
+    , m_thermal(DeviceProfile::current().thermalPaths())
 {
     set("Percent", 0);
     set("State", "unknown");
     set("Charging", false);
 
-    // зоны температуры по имени: номера thermal_zone* на разных загрузках могут меняться
-    const QDir dir("/sys/class/thermal");
-    for (const QString &z : dir.entryList({"thermal_zone*"}, QDir::Dirs)) {
-        const QByteArray type = readSys(dir.filePath(z + "/type"));
-        if (type == "cpu-1-max-step")
-            m_cpuZone = dir.filePath(z + "/temp");
-        else if (type == "skin-therm")
-            m_skinZone = dir.filePath(z + "/temp");
+    if (DeviceProfile::current().tablet) {
+        // Начальное состояние до ответа UPower. Дальше DisplayDevice обновляет его по событиям.
+        const QString battery = DeviceProfile::battery();
+        bool ok = false;
+        const int capacity = readDeviceFile(battery + "capacity").toInt(&ok);
+        if (ok)
+            set("Percent", qBound(0, capacity, 100));
+        const auto status = readDeviceFile(battery + "status");
+        uint state = status == "Charging" ? 1 : status == "Discharging" ? 2 : status == "Full" ? 4 : 0;
+        if (status == "Not charging" && readDeviceFile(DeviceProfile::usbSupply() + "present") == "1")
+            state = 5;
+        if (state)
+            apply({{"State", state}});
     }
 
     bus().connect(UPOWER, DISPLAY_DEVICE, "org.freedesktop.DBus.Properties", "PropertiesChanged", this,
@@ -82,14 +80,14 @@ void Battery::apply(const QVariantMap &upower)
 
 QVariantMap Battery::Sample() const
 {
-    const QString b = BATTERY, usb = USB;
+    const QString b = DeviceProfile::battery(), usb = DeviceProfile::usbSupply();
     return {
         {"currentMa", sysNum(b + "current_now") / 1000},
         {"currentAvgMa", sysNum(b + "current_avg") / 1000},   // среднее датчика — с него начинать сглаживание
         {"voltageMv", sysNum(b + "voltage_now") / 1000},
         {"batteryC", sysNum(b + "temp") / 10.0},
-        {"cpuC", readSys(m_cpuZone).toDouble() / 1000},
-        {"skinC", readSys(m_skinZone).toDouble() / 1000},
+        {"cpuC", maxTemperature(m_thermal.cpu)},
+        {"skinC", readDeviceFile(m_thermal.skin).toDouble() / 1000},
         // датчик заряда (fuel gauge): мкА·ч → мА·ч
         {"chargeMah", sysNum(b + "charge_counter") / 1000},
         {"fullMah", sysNum(b + "charge_full") / 1000},

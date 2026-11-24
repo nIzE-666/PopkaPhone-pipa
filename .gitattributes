@@ -1,0 +1,5 @@
+# Keep Linux scripts, systemd units, and tablet bot files LF even on Windows checkouts
+device/* text eol=lf
+extras/tg-bot/** text eol=lf
+*.sh text eol=lf
+*.service text eol=lf

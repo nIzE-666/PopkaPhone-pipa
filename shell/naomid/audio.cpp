@@ -116,6 +116,21 @@ Audio::Audio(QObject *parent)
     });
 }
 
+Audio::~Audio()
+{
+    m_events.disconnect(this);
+    m_retry.stop();
+    m_refresh.stop();
+    m_apply.stop();
+    if (m_events.state() != QProcess::NotRunning) {
+        m_events.terminate();
+        if (!m_events.waitForFinished(500)) {
+            m_events.kill();
+            m_events.waitForFinished(200);
+        }
+    }
+}
+
 void Audio::subscribe()
 {
     m_known.clear();   // новое подключение — PulseAudio мог перезапуститься: громкости выходов вернуть заново

@@ -9,6 +9,7 @@
 #include "cable.h"
 #include "cell.h"
 #include "charge.h"
+#include "device_profile.h"
 #include "gpu.h"
 #include "net.h"
 #include "perf.h"
@@ -21,11 +22,20 @@
 #include <QDBusConnection>
 #include <QDBusError>
 #include <QLoggingCategory>
+#include <QTextStream>
 
 int main(int argc, char **argv)
 {
     QCoreApplication app(argc, argv);
     app.setApplicationName("naomid");
+    const auto &profile = DeviceProfile::current();
+    if (app.arguments().size() == 2) {
+        const QString option = app.arguments().at(1);
+        if (option == "--device" || option == "--backlight") {
+            QTextStream(stdout) << (option == "--device" ? QString::fromLatin1(profile.name) : profile.backlight()) << '\n';
+            return 0;
+        }
+    }
 
     QDBusConnection bus = QDBusConnection::systemBus();
     if (!bus.isConnected()) {
@@ -57,6 +67,7 @@ int main(int argc, char **argv)
     }
     auto *unixSignals = new UnixSignals(&app);
     QObject::connect(unixSignals, &UnixSignals::terminate, &app, &QCoreApplication::quit);
-    qInfo("naomid: работаю — батарея, заряд, Wi-Fi, сотовая сеть, звук, Bluetooth, датчики, сеть, видеочип, стол на полную, система, задачи Android");
+    qInfo("naomid: профиль %s, кластеры CPU %d+%d+%d", profile.name, profile.clusters[0].coreCount,
+          profile.clusters[1].coreCount, profile.clusters[2].coreCount);
     return app.exec();
 }

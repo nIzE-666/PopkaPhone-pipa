@@ -49,6 +49,7 @@
 #include <array>
 #include <atomic>
 #include <cerrno>
+#include <climits>
 #include <cmath>
 #include <chrono>
 #include <cstring>
@@ -227,7 +228,7 @@ std::string sshInterface(uint16_t port)
 int routeOf(const std::string &iface)
 {
     return iface.rfind("usb", 0) == 0 ? stream::RouteCable
-         : iface.rfind("wlan", 0) == 0 ? stream::RouteWifi : stream::RouteUnknown;
+         : iface.rfind("wl", 0) == 0 ? stream::RouteWifi : stream::RouteUnknown;
 }
 
 // Интерфейс поднят и с несущей. Кабель вынут — у usb0 гаснет несущая (гаджет отключён хозяином), гаджет сброшен —
@@ -246,7 +247,7 @@ bool linkUp(const std::string &iface)
     return up;
 }
 
-// IPv4 Wi-Fi телефона (первый wlan*, 0 — нет): зрителю — для запасного пути (Address)
+// IPv4 Wi-Fi (wlan*, wlp* и другие имена wl*, 0 — нет): зрителю для запасного пути (Address).
 in_addr_t wifiAddress()
 {
     ifaddrs *list = nullptr;
@@ -254,7 +255,7 @@ in_addr_t wifiAddress()
         return 0;
     in_addr_t a = 0;
     for (ifaddrs *i = list; i && !a; i = i->ifa_next)
-        if (i->ifa_addr && i->ifa_addr->sa_family == AF_INET && !strncmp(i->ifa_name, "wlan", 4))
+        if (i->ifa_addr && i->ifa_addr->sa_family == AF_INET && !strncmp(i->ifa_name, "wl", 2))
             a = reinterpret_cast<sockaddr_in *>(i->ifa_addr)->sin_addr.s_addr;
     freeifaddrs(list);
     return a;
@@ -289,6 +290,10 @@ struct StreamService::Shared {
     int source = Phone;         // что смотрит зритель
     int owner = -1;             // чьи буферы выложены (inputs, outputs): источник
     bool buffersReady = false;  // буферы кадра (inputs, outputs) выложены
+    bool poolFailed = false;
+    VenusEncoder::Queues queues;
+    uint64_t generation = 0;   // смена настроек кодера между записью кадра и передачей fd
+    int captureIntervalUs = 0;
     bool running = false;       // кодер запущен
     // Стол меняет размер: его буферы кадра — заново, кадры пока не снимать. Счётчик, а не флаг: смен бывает две подряд
     // (главный экран сменился — форма стола от прежнего зрителя, через миллисекунды — от нового), и кадр между ними
@@ -296,6 +301,7 @@ struct StreamService::Shared {
     // работающим кодером (21 ноября 2026: кодер отдавал пустые кадры без конца, поток службы зациклился — стол
     // «включён», а ни один экран его не показывает)
     int deskResize = 0;
+    int sceneRotation = 0, requestedRotation = 0;   // поворот сцены планшета (поток интерфейса → кодер)
     bool encoderStale = false;  // буферы кадра освобождены под работающим кодером — запустить его заново (поток службы)
     int width[2] = {720, 1920}, height[2] = {1560, 1080};   // кадр потока у каждого источника
     std::vector<VenusEncoder::Buffer> inputs;
@@ -350,13 +356,15 @@ struct StreamService::Shared {
 
 struct StreamService::Gl {
     bool ready = false;
-    bool failed = false;
     EGLDisplay dpy = EGL_NO_DISPLAY;
     QSize source;               // кадр источника, пиксели
     int width = 0, height = 0;  // под какой кадр потока выделены буферы
+    int rotation = 0;
     GLuint srcTex = 0, srcFbo = 0;   // копия кадра окна телефона (кадр окна нельзя читать шейдером)
     std::vector<GrallocBuffer> in;
     std::vector<GrallocBuffer> out;
+    std::vector<GrallocBuffer> inExtra, outExtra;
+    VenusEncoder::Queues queues;
     Nv12Packer packer;
 };
 
@@ -381,19 +389,30 @@ void StreamService::capture(int source)
         }
         return;
     }
-    if (s.source != source || (source == Desktop && s.deskResize))
+    if (s.source != source || (source == Desktop && s.deskResize) || s.sceneRotation != s.requestedRotation)
         return;
+    const auto queues = s.queues;
+    if (!queues.inputs || !queues.outputs || s.poolFailed)
+        return;
+    const uint64_t generation = s.generation;
+    const int w = s.width[source], h = s.height[source];
+    const int rotation = source == Phone ? s.sceneRotation : 0;
     QQuickWindow *window = source == Desktop ? m_desktop->window() : m_window.data();
-    if (!g.ready) {
-        if (g.failed)
+    if (g.ready && (g.width != w || g.height != h || g.rotation != rotation
+                    || g.queues.inputs != queues.inputs || g.queues.outputs != queues.outputs
+                    || g.queues.inputExtra != queues.inputExtra || g.queues.packet != queues.packet
+                    || g.queues.packetExtra != queues.packetExtra)) {
+        if (s.running)
             return;
-        const int w = s.width[source], h = s.height[source];
+        releaseGl(g);
+    }
+    if (!g.ready) {
         lock.unlock();
         g.dpy = eglGetCurrentDisplay();
-        const VenusEncoder::Layout L = VenusEncoder::nv12Layout(w, h);
+        const auto &L = queues.input;
         // буфер кадра для кодера — RGBA, ширина равна строке: gralloc строку иногда выравнивает (1920 × 1080: 512 → 768
         // пикселей) — упаковщик считает байты по строке буфера и заполняет её всю
-        g.in.resize(kInputs);
+        g.in.resize(queues.inputs);
         bool ok = true;
         for (GrallocBuffer &b : g.in)
             ok = ok
@@ -401,15 +420,21 @@ void StreamService::capture(int source)
                                           kGrallocHwRender | kGrallocHwTexture | kGrallocHwVideoEncoder
                                               | kGrallocSwReadRarely)
                  && grallocBindGl(b, g.dpy) && b.stride == g.in[0].stride && b.size >= L.size;
-        ok = ok && g.packer.init(w, h, L.stride, L.yScan, L.size, g.in[0].stride);
+        ok = ok && g.packer.init(w, h, L.stride, L.yScan, L.size, g.in[0].stride, rotation);
         // сжатые кадры: буфер не меньше того, что просит кодер (720 × 1560 — 848 КиБ); в потоке службы gralloc
         // буфер не выделял (13 ноября 2026) — все буферы выделяет поток источника
-        g.out.resize(kOutputs);
+        g.out.resize(queues.outputs);
         for (GrallocBuffer &b : g.out)
             ok = ok
-                 && grallocAllocate(b, std::max(w * h, 1 << 20), 1, kGrallocBlob,
+                 && queues.packet <= INT_MAX && grallocAllocate(b, int(queues.packet), 1, kGrallocBlob,
                                     kGrallocSwReadOften | kGrallocHwVideoEncoder)
                  && grallocMapForCpu(b);
+        g.inExtra.resize(queues.inputExtra ? queues.inputs : 0);
+        g.outExtra.resize(queues.packetExtra ? queues.outputs : 0);
+        for (GrallocBuffer &b : g.inExtra)
+            ok = ok && grallocAllocateExtra(b, queues.inputExtra);
+        for (GrallocBuffer &b : g.outExtra)
+            ok = ok && grallocAllocateExtra(b, queues.packetExtra);
         if (source == Phone) {   // у стола кадр уже текстура — копия не нужна
             glGenTextures(1, &g.srcTex);
             glBindTexture(GL_TEXTURE_2D, g.srcTex);
@@ -424,15 +449,21 @@ void StreamService::capture(int source)
             qCWarning(lcStream, "буферы кадра для кодера не выделены (%s, %dx%d: строка %d — у буферов %d, %zu байт "
                       "из %zu) — трансляции не будет", source == Desktop ? "стол" : "телефон", w, h, L.stride,
                       g.in.empty() ? -1 : g.in[0].stride * 4, g.in.empty() ? size_t(0) : g.in[0].size, L.size);
-            g.failed = true;
             releaseGl(g);
+            lock.lock();
+            if (generation == s.generation) {
+                s.poolFailed = true;
+                s.wake();
+            }
             return;
         }
         g.ready = true;
         g.width = w;
         g.height = h;
+        g.rotation = rotation;
+        g.queues = queues;
         lock.lock();
-        if (!s.want || s.source != source)
+        if (!s.want || s.source != source || generation != s.generation)
             return;   // пока выделяли, зритель ушёл или переключился — буферы останутся до конца сеанса
     }
     // Пока выделяли буферы, стол снова сменил размер (или смена ждёт своей очереди): эти буферы — под прежний кадр,
@@ -441,18 +472,23 @@ void StreamService::capture(int source)
     if ((source == Desktop && s.deskResize) || g.width != s.width[source] || g.height != s.height[source])
         return;
     if (s.owner != source) {   // свои буферы — кодеру (впервые или снова к этому источнику)
-        s.inputs.clear();
-        for (const GrallocBuffer &b : g.in)
-            s.inputs.push_back({b.fd, b.size, nullptr});
-        s.outputs.clear();
-        for (const GrallocBuffer &b : g.out)
-            s.outputs.push_back({b.fd, b.size, b.map});
-        s.freeSlot.assign(kInputs, true);
+        const auto buffers = [](const auto &frames, const auto &extra) {
+            std::vector<VenusEncoder::Buffer> out;
+            for (size_t i = 0; i < frames.size(); ++i) {
+                const auto &b = frames[i];
+                out.push_back({b.fd, b.size, b.map, extra.empty() ? -1 : extra[i].fd,
+                               extra.empty() ? 0 : extra[i].size});
+            }
+            return out;
+        };
+        s.inputs = buffers(g.in, g.inExtra);
+        s.outputs = buffers(g.out, g.outExtra);
+        s.freeSlot.assign(g.in.size(), true);
         s.owner = source;
         s.buffersReady = true;
         s.wake();
     }
-    if (!s.running)
+    if (!s.running || (s.captureIntervalUs && nowUs() - s.lastCaptureUs < s.captureIntervalUs))
         return;
     int slot = -1;
     for (int i = 0; i < int(s.freeSlot.size()); ++i)
@@ -512,6 +548,12 @@ void StreamService::capture(int source)
     window->endExternalCommands();
 
     lock.lock();
+    if (!s.running || generation != s.generation) {
+        for (int fd : {fence, frameFence})
+            if (fd >= 0)
+                ::close(fd);
+        return;
+    }
     // кадр стола по такту зрителя — с его значением (Echo вернёт зрителю: к какому обновлению монитора кадр) и с
     // меткой экрана без дока (Away), если она ждёт кадра
     s.jobs.push_back({slot, fence, t, frameFence, source == Desktop ? std::exchange(m_tickValue, 0) : 0,
@@ -522,12 +564,11 @@ void StreamService::capture(int source)
 
 void StreamService::releaseGl(Gl &g)
 {
-    for (GrallocBuffer &b : g.in)
-        grallocFree(b, g.dpy);
-    g.in.clear();
-    for (GrallocBuffer &b : g.out)
-        grallocFree(b, g.dpy);
-    g.out.clear();
+    for (auto *pool : {&g.in, &g.out, &g.inExtra, &g.outExtra}) {
+        for (auto &b : *pool)
+            grallocFree(b, g.dpy);
+        pool->clear();
+    }
     g.packer.release();
     if (g.srcFbo)
         glDeleteFramebuffers(1, &g.srcFbo);
@@ -672,6 +713,7 @@ private:
     void applyWants();
     void applySource();
     void applySize();
+    void applyNativeRotation();
     void sendShow(int path = -1);                // −1 — всем путям всех зрителей, если сменилось
     void sendWall(Viewer &v, int path);          // обои заставки, если у него не те
     void sendLights(Viewer &v);                  // яркость его экранов (ScreenLight)
@@ -683,6 +725,7 @@ private:
     void park(size_t i);                         // путь — тихий (Switch 0)
     void activate(size_t i);
     void closePath(size_t i);
+    void prepareEncoder();
     void startEncoder();
     void hello(int path = -1);                   // −1 — всем путям сеансов, с новым номером; путь — только ему, с тем же
     void switchSource(int source);
@@ -745,6 +788,7 @@ private:
     bool m_encHevc = false;                      // чем сжимает идущий кодер
     std::vector<std::pair<uint32_t, int32_t>> m_extra;   // NAOMI_STREAM_CTRL
     VenusEncoder m_enc;
+    VenusEncoder::Settings m_encSettings;
     bool m_encoding = false;
     int m_emptyRun = 0;            // пустых кадров кодера подряд
     int m_encRestarts = 0;         // сколько раз кодер запущен заново из-за них за последние 10 с
@@ -857,6 +901,7 @@ void StreamService::Worker::run()
             for (const auto &[viewer, screen, on] : wakes)
                 sendScreenWake(viewer, screen, on);
         }
+        applyNativeRotation();
         applyOperatingRate();
         // пути — по номеру сокета: сообщение одного пути может закрыть другие (Join нового зрителя), номера в списке
         // при этом сдвигаются
@@ -974,15 +1019,20 @@ void StreamService::Worker::run()
                 sendAddress(-1);
         }
 
-        // буферы готовы — запустить кодер; новые кадры от потока отрисовки
+        // Сначала очередь драйвера, затем выделение dma-buf в потоке GL и запуск кодера.
         {
             std::unique_lock lock(m_s->m);
             const bool start = m_s->buffersReady && !m_encoding;
+            const bool failed = m_s->poolFailed;
             for (auto &j : m_s->jobs)
                 m_pending.push_back(j);
             m_s->jobs.clear();
             lock.unlock();
-            if (start)
+            if (failed)
+                retryEncoder("не получил буферы");
+            else if (!m_enc.queues().inputs)
+                prepareEncoder();
+            else if (start)
                 startEncoder();
         }
         // видеочип закончил упаковку — кадр в кодер
@@ -1005,7 +1055,12 @@ void StreamService::Worker::run()
             const int64_t queued = nowUs();
             if (m_encoding && j.away == 1 + stream::AwayFinal)
                 m_enc.requestKeyFrame();   // последний кадр ухода — опорный: зритель запомнит его как обои
-            if (m_encoding && m_enc.encode(j.slot, j.captureUs)) {
+            if (m_encoding) {
+                if (!m_enc.encode(j.slot, j.captureUs)) {
+                    m_pending.erase(m_pending.begin() + long(i));
+                    retryEncoder("не принял кадр");
+                    break;
+                }
                 m_inEncoder[j.captureUs] = queued;
                 if (j.tick)
                     m_tickOf[j.captureUs] = j.tick;
@@ -2058,10 +2113,11 @@ void StreamService::Worker::hello(int path)
         w = m_s->width[source];
         h = m_s->height[source];
     }
-    QJsonObject json{{"width", w}, {"height", h}, {"fps", source == Desktop ? m_deskFps : 90},
+    const bool native = m_service->m_localDesktop;
+    QJsonObject json{{"width", w}, {"height", h}, {"fps", native ? std::min(m_deskFps, 60) : source == Desktop ? m_deskFps : 90},
                      {"codec", m_hevc ? "hvc1" : "avc1.42E033"},
                      {"bitrate", m_bitrate}, {"name", "NaomiPhone"},
-                     {"mode", source == Desktop ? "desktop" : "phone"},
+                     {"mode", native || source == Desktop ? "desktop" : "phone"},
                      {"gen", int(path < 0 ? ++m_helloGen : m_helloGen)}};
     const QByteArray bytes = QJsonDocument(json).toJson(QJsonDocument::Compact);
     const std::vector<uint8_t> msg = message(stream::Hello, bytes.constData(), size_t(bytes.size()));
@@ -2092,14 +2148,15 @@ void StreamService::Worker::switchSource(int source)
 
 void StreamService::Worker::stopEncoding()
 {
-    if (m_encoding) {
-        m_enc.close();
-        m_encoding = false;
-    }
+    m_enc.close();
+    m_encoding = false;
     {
         std::lock_guard lock(m_s->m);
         m_s->running = false;
         m_s->buffersReady = false;
+        m_s->poolFailed = false;
+        m_s->queues = {};
+        ++m_s->generation;
         m_s->owner = -1;
         for (auto &j : m_s->jobs)
             for (int fd : {j.fence, j.frameFence})
@@ -2117,6 +2174,24 @@ void StreamService::Worker::stopEncoding()
     for (Path &p : m_paths)
         for (auto it = p.out.begin(); it != p.out.end();)
             it = it->video && it->sent == 0 ? p.out.erase(it) : it + 1;
+}
+
+void StreamService::Worker::applyNativeRotation()
+{
+    {
+        std::lock_guard lock(m_s->m);
+        if (m_s->requestedRotation == m_s->sceneRotation)
+            return;
+    }
+    stopEncoding();
+    {
+        std::lock_guard lock(m_s->m);
+        if (m_s->requestedRotation % 180 != m_s->sceneRotation % 180)
+            std::swap(m_s->width[Phone], m_s->height[Phone]);
+        m_s->sceneRotation = m_s->requestedRotation;
+    }
+    if (m_session)
+        hello();
 }
 
 // Форма и масштаб стола (DeskSize). Окно Mac шлёт только высоту: ширина 1280 точек, масштаб 1,5 (кадр 1920), высота —
@@ -2163,13 +2238,17 @@ void StreamService::Worker::want(bool hevc, int fps, int encodeFps)
 {
     if (hevc == m_hevc && fps == m_deskFps && encodeFps == m_encodeFps)
         return;
+    const bool announce = hevc != m_hevc || fps != m_deskFps;
     m_hevc = hevc;
     m_deskFps = fps;
     m_encodeFps = encodeFps;
     qCInfo(lcStream, "зрители просят: %s, стол %d к/с, кодеру — как для %d", hevc ? "HEVC" : "H.264", fps, encodeFps);
     post([svc = m_service, fps] { svc->onDesktopFps(fps, true); });
-    if (m_encoding) {
+    if (m_enc.queues().inputs) {
         stopEncoding();
+        hello();
+        post([svc = m_service] { svc->requestFrame(); });
+    } else if (announce && m_session) {
         hello();
     }
 }
@@ -2215,7 +2294,7 @@ void StreamService::Worker::applyOperatingRate()
 {
     if (!m_encoding)
         return;
-    const int rate = operatingRate(m_encWidth, m_encHeight, m_encDesk);
+    const int rate = m_service->m_localDesktop ? m_encSettings.fps : operatingRate(m_encWidth, m_encHeight, m_encDesk);
     if (rate == m_encRate)
         return;
     if (m_enc.setOperatingRate(rate))
@@ -2224,28 +2303,27 @@ void StreamService::Worker::applyOperatingRate()
     m_encRate = rate;
 }
 
-void StreamService::Worker::startEncoder()
+void StreamService::Worker::prepareEncoder()
 {
     VenusEncoder::Settings st;
-    std::vector<VenusEncoder::Buffer> inputs, outputs;
     bool desk;
     {
         std::lock_guard lock(m_s->m);
         desk = m_s->source == Desktop;
+        if (desk && m_s->deskResize)
+            return;
         st.width = m_s->width[m_s->source];
         st.height = m_s->height[m_s->source];
-        inputs = m_s->inputs;
-        outputs = m_s->outputs;
-        m_s->freeSlot.assign(inputs.size(), true);
     }
     // Названная кодеру частота — настоящая: экран телефона — 90, стол — частота его кадров (Want fps). Раньше столу
     // называли больше, чем шло (Want encodeFps: 120 при 75 кадрах — чтобы кодер шёл быстрее); с 17 ноября 2026 это
     // делает «скорость работы», а названное зрителем — её нижняя граница (operatingRate). На время сжатия и размер
     // кадра названная частота не влияет (замер 20 ноября 2026). NAOMI_STREAM_FPS — своя
-    st.fps = desk ? m_deskFps : 90;
+    const bool native = m_service->m_localDesktop;
+    st.fps = native ? std::min(m_deskFps, 60) : desk ? m_deskFps : 90;
     if (const int fps = envInt("NAOMI_STREAM_FPS", 0))   // разведка: своя названная частота
         st.fps = fps;
-    st.operatingRate = operatingRate(st.width, st.height, desk);
+    st.operatingRate = native ? st.fps : operatingRate(st.width, st.height, desk);
     st.hevc = m_hevc;
     // Цель битрейта — та же при любой названной частоте: размер кадра у этого кодера идёт за целью, а не за целью на
     // кадр (замер 20 ноября 2026, окно тащат 40 с: 75 к/с и 60 Мбит/с — кадр 26 КБ, как при названных 120; цель
@@ -2253,20 +2331,39 @@ void StreamService::Worker::startEncoder()
     st.bitrate = m_bitrate;
     st.maxQp = m_maxQp;
     st.extra = m_extra;
-    bool ok = m_enc.open(st);
-    for (const auto &b : outputs)
-        ok = ok && b.size >= m_enc.packetBufferSize();
-    ok = ok && m_enc.start(inputs, outputs);
-    if (!ok) {
+    if (!m_enc.open(st) || !m_enc.prepareQueues(kInputs, kOutputs)) {
+        retryEncoder("не подготовил очередь");
+        return;
+    }
+    m_encSettings = st;
+    m_encDesk = desk;
+    {
+        std::lock_guard lock(m_s->m);
+        m_s->queues = m_enc.queues();
+        m_s->captureIntervalUs = native ? 1000000 / std::max(1, st.fps) : 0;
+    }
+    post([svc = m_service] { svc->requestFrame(); });
+}
+
+void StreamService::Worker::startEncoder()
+{
+    std::vector<VenusEncoder::Buffer> inputs, outputs;
+    {
+        std::lock_guard lock(m_s->m);
+        inputs = m_s->inputs;
+        outputs = m_s->outputs;
+        m_s->freeSlot.assign(inputs.size(), true);
+    }
+    if (!m_enc.start(inputs, outputs)) {
         m_enc.close();
         retryEncoder("не запустился");
         return;
     }
+    const auto &st = m_encSettings;
     m_encoding = true;
     m_emptyRun = 0;
     m_encWidth = st.width;
     m_encHeight = st.height;
-    m_encDesk = desk;
     m_encRate = st.operatingRate;
     m_config.clear();
     {
@@ -2292,6 +2389,10 @@ void StreamService::Worker::stopSession()
         std::lock_guard lock(m_s->m);
         m_s->want = false;
         m_s->running = false;
+        m_s->buffersReady = false;
+        m_s->poolFailed = false;
+        m_s->queues = {};
+        ++m_s->generation;
         for (auto &j : m_s->jobs)
             for (int fd : {j.fence, j.frameFence})
                 if (fd >= 0)
@@ -2828,7 +2929,7 @@ void StreamService::Worker::handle(size_t i, uint8_t type, const uint8_t *p, siz
         v.deskFps = std::clamp(w.value(QStringLiteral("fps")).toInt(kDeskFps), 30, 120);
         v.encodeFps = std::clamp(w.value(QStringLiteral("encodeFps")).toInt(v.deskFps), v.deskFps, 240);
         v.hevc = w.value(QStringLiteral("codec")).toString() == QStringLiteral("hevc");
-        v.lock = w.value(QStringLiteral("lock")).toBool();
+        v.lock = !m_service->m_localDesktop && w.value(QStringLiteral("lock")).toBool();
         v.audio = w.value(QStringLiteral("audio")).toBool();
         v.wanted = true;
         applyWants();
@@ -3098,10 +3199,11 @@ void StreamService::checkIdleExit()
 // страница меняет форму и сама (ссылка появилась под стоящей мышью)
 void StreamService::checkCursor()
 {
-    if (m_source != Desktop || !m_desktop)
+    const StreamScreen *screen = m_localDesktop ? m_localDesktop : m_source == Desktop ? m_desktop : nullptr;
+    if (!screen || !m_connected)
         return;
     uint8_t shape = stream::CursorArrow;
-    switch (m_desktop->window()->cursor().shape()) {
+    switch (screen->window()->cursor().shape()) {
     case Qt::PointingHandCursor: case Qt::OpenHandCursor: shape = stream::CursorHand; break;
     case Qt::IBeamCursor: shape = stream::CursorText; break;
     case Qt::SizeHorCursor: case Qt::SplitHCursor: shape = stream::CursorSizeH; break;
@@ -3173,6 +3275,12 @@ void StreamService::setLayout(const QString &layout)
     m_shared->wake();
 }
 
+void StreamService::injectKey(bool down, int qtKey, int modifiers, const QString &text)
+{
+    if (m_input)
+        m_input->key(down, qtKey, modifiers, text);
+}
+
 void StreamService::onAudioViewer(bool on)
 {
     if (on == m_audio)
@@ -3230,19 +3338,43 @@ void StreamService::updateCapture()
     });
 }
 
-void StreamService::attach(QQuickWindow *window)
+void StreamService::attach(QQuickWindow *window, StreamScreen *localDesktop, int sceneRotation)
 {
     m_window = window;
     m_input->setWindow(window);
+    if (localDesktop) {
+        m_localDesktop = localDesktop;
+        m_input->setDesktop(localDesktop);
+        connect(m_keyboard, &HardKeyboard::key, this, [this](bool down) { if (down) emit activity(); });
+        // Первый запуск панели и проба Venus выполняются отдельно.
+        if (qEnvironmentVariableIntValue("NAOMI_PIPA_STREAM") != 1)
+            return;
+    }
     // кадр потока — той же формы, что экран: ширина своя (720), высота в той же доле, чётная
     const QSize screen = window->screen()->handle()->geometry().size();
     m_gl[Phone]->source = screen;
     {
         std::lock_guard lock(m_shared->m);
-        m_shared->height[Phone] = qRound(double(screen.height()) * m_shared->width[Phone] / screen.width() / 2) * 2;
+        const QSize image = localDesktop ? screen.transposed() : screen;
+        int &w = m_shared->width[Phone], &h = m_shared->height[Phone];
+        if (localDesktop)
+            w = std::clamp(envInt("NAOMI_STREAM_WIDTH", 1280), 360, image.width()) / 2 * 2;
+        h = qRound(double(image.height()) * w / image.width() / 2) * 2;
+        if (localDesktop && sceneRotation % 180 == 0)
+            std::swap(w, h);
+        m_shared->sceneRotation = m_shared->requestedRotation = sceneRotation;
     }
     connect(window, &QQuickWindow::afterRendering, this, [this] { capture(Phone); }, Qt::DirectConnection);
     m_worker = std::make_unique<Worker>(this, m_shared);
+}
+
+void StreamService::setNativeRotation(int rotation)
+{
+    if (!m_localDesktop || !m_worker)
+        return;
+    std::lock_guard lock(m_shared->m);
+    m_shared->requestedRotation = rotation;
+    m_shared->wake();
 }
 
 // рабочий стол — до attach() (служба начинает слушать в attach)
@@ -3287,7 +3419,6 @@ void StreamService::onDesktopSize(QSize logical, double scale)
         m_desktop->doneCurrent();
         m_shared->wake();
     }
-    g.failed = false;
     m_desktop->setGeometry(logical, scale);
     g.source = m_desktop->pixelSize();
     {
@@ -3840,8 +3971,8 @@ void StreamService::onSource(int source)
     m_source = source;
     if (m_desktop)
         m_desktop->setActive(source == Desktop);
-    m_input->setDesktop(source == Desktop ? m_desktop : nullptr);
-    if (source == Desktop && m_desktop)
+    m_input->setDesktop(m_localDesktop ? m_localDesktop : source == Desktop ? m_desktop : nullptr);
+    if ((source == Desktop && m_desktop) || (m_localDesktop && m_connected))
         m_cursorPoll.start();
     else
         m_cursorPoll.stop();

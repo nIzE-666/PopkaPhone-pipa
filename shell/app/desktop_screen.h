@@ -1,5 +1,4 @@
-// НаомиФон — рабочий стол: второй экран оболочки, горизонтальный (ширина 1280 точек, высота — под окно зрителя, от 16:9
-// до 4:3), только для трансляции (docs/DESKTOP.md).
+// НаомиФон — рабочий стол: на pipa рисуется в основном окне, на redfin — во втором выводе для трансляции.
 // Его нет на панели телефона: сцена Qt Quick (qml/desktop/Desktop.qml, тот же движок QML, что у оболочки)
 // рисуется в текстуру своим контекстом OpenGL ES (QQuickRenderControl) в потоке интерфейса — и только пока
 // его смотрят (setActive); телефон в это время живёт своей жизнью. Кадр берёт служба трансляции (afterRendering
@@ -46,12 +45,14 @@ class DesktopScreen : public QObject, public StreamScreen
     Q_PROPERTY(double pixelScale READ pixelScale NOTIFY pixelsChanged)
 public:
     // logical — размер в точках интерфейса, dpr — пикселей в точке: кадр — logical × dpr
-    DesktopScreen(QQmlEngine *engine, const QString &qml, QSize logical, qreal dpr, QObject *parent = nullptr);
+    DesktopScreen(QQmlEngine *engine, const QString &qml, QSize logical, qreal dpr,
+                  QQuickWindow *nativeWindow = nullptr, int sceneRotation = 0, QObject *parent = nullptr);
     ~DesktopScreen() override;
 
     QQuickWindow *window() const override { return m_window; }   // есть сразу; сцена и GL — с первым setActive
     QSize pixelSize() const override { return m_pixels; }
     QSize logicalSize() const override { return m_logical; }
+    QPointF mapToWindow(QPointF point) const override;
     // Форма и масштаб по просьбе зрителя (docs/DESKTOP.md, «Форма стола»): окно Mac — высота под окно (1280 точек,
     // масштаб 1,5), приставка на Pi — сколько точек и пикселей под свой монитор. Кадр — новая текстура в своём
     // контексте; сцена, корень QML и вывод Wayland для окон программ — нового размера.
@@ -65,7 +66,10 @@ public:
     // дальше» после кадра стола, а не телефона. Частота вывода — кадров стола в секунду (зритель просит — Want), и
     // каждый кадр стола — отметка показа (wp_presentation): по ним Android ведёт свою развёртку в такт стола
     // (docs/ANDROID.md, «Кадры в такт стола»)
-    void setCompositor(QWaylandCompositor *compositor);
+    void setCompositor(QWaylandCompositor *compositor, QWaylandQuickOutput *nativeOutput = nullptr);
+    bool showNative();
+    void setSceneRotation(int rotation);
+    void setNativeRefreshRate(double hz);
     QWaylandOutput *output() const;
     QWaylandOutput *winOutput() const { return m_winOutput; }   // «экран» программ Windows (desktop_screen.cpp)
     // окно телефона: пока стол смотрят, часы анимаций шагают и после его кадров — у него свои анимации (setActive)
@@ -118,6 +122,8 @@ signals:
 
 private:
     bool init();
+    bool loadScene();
+    void resizeNative();
     void render();
     void setClock(bool own);   // часы анимаций потока интерфейса: свои (стол смотрят) или Qt (кадрами телефона)
     void stepClock();          // анимации — на сейчас (свои часы)
@@ -126,6 +132,8 @@ private:
     QString m_qml;
     QSize m_logical, m_pixels;
     qreal m_dpr;
+    const bool m_native;
+    int m_sceneRotation;
     QQuickRenderControl *m_control = nullptr;
     qint64 m_periodUs = 1000000 / 90;   // кадр стола не чаще (90 к/с)
     QQuickWindow *m_window = nullptr;
@@ -163,6 +171,7 @@ private:
     bool m_echoSkipped = false;  // прошлый кадр был эхом и пропущен
     qint64 m_statGapUs = 0, m_statFrom = 0, m_prevUs = 0;
     bool m_pulseOn = false;
+    quint64 m_pulseFrames = 0, m_pulseDrops = 0;
     std::vector<int> m_pulseWork;
     int m_pulseMissed = 0;
     qint64 m_pulseTickUs = 0;

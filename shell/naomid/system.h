@@ -4,6 +4,8 @@
 
 #include "bus_object.h"
 
+#include <QProcess>
+
 class System : public BusObject
 {
     Q_OBJECT
@@ -15,4 +17,11 @@ public:
 public slots:
     Q_SCRIPTABLE void Reboot();
     Q_SCRIPTABLE void PowerOff();
+    Q_SCRIPTABLE void RebootOneUi(const QDBusMessage &request);
+
+private:
+    void replyToOneUi(const QString &error);
+
+    QProcess m_oneUi;
+    QDBusMessage m_oneUiRequest;
 };

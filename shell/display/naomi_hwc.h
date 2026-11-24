@@ -1,10 +1,11 @@
 // НаомиФон — драйвер экрана для Qt (eglfs device integration): Qt Quick рисует прямо в HWC2
-// через libhybris, без Mir и Lomiri. Включает режим панели (90 Гц по умолчанию) и считает реально
+// через libhybris, без Mir и Lomiri. Включает режим панели по профилю устройства и считает реально
 // выведенные кадры. Подробности — docs/DISPLAY.md.
 #pragma once
 
 #include "naomi_display.h"
 #include "present_timer.h"
+#include "device_profile.h"
 
 #include <QtCore/QList>
 #include <QtCore/QObject>
@@ -55,8 +56,9 @@ public:
     NaomiFrameSnapshot snapshot() const { return m_timer.snapshot(); }
     NaomiDisplaySizes sizes() const
     {
-        return {m_size.width(), m_size.height(), m_panel.width(), m_panel.height()};
+        return {m_size.width(), m_size.height(), m_panel.width(), m_panel.height(), m_sceneRotation};
     }
+    int refreshRates(int *out, int capacity) const;
     static NaomiHwcIntegration *instance() { return s_instance; }
 
 private:
@@ -68,7 +70,11 @@ private:
     void present(ANativeWindowBuffer *buffer);
     void frameSwapped();   // поток интерфейса: обмен буферов кадра кончился
     void flushUpdates();   // поток интерфейса: отдать окнам отложенные кадры
+    void requestFullFrame();
     void readActiveConfig();
+    int configForHz(int hz) const;
+    int kickHz(int hz) const;
+    void setMeasuredHz(double hz);
     bool applyConfig(int hz);
     void driveRefresh();
 
@@ -80,9 +86,13 @@ private:
     ANativeWindow *m_window = nullptr;
     ANativeWindowBuffer *m_shown = nullptr;   // буфер прошлого кадра: свободен, когда панель покажет следующий
     void *m_setConfigSym = nullptr;   // HWC2::impl::Display::setActiveConfigWithConstraints
-    QSize m_size;                     // кадр Qt (NAOMI_RENDER — меньше панели)
-    QSize m_panel;                    // панель
-    bool m_scaled = false;            // кадр меньше панели: слой DEVICE, растягивает дисплей (MDP)
+    void *m_vsyncPeriodSym = nullptr;
+    QSize m_size;                     // кадр Qt в ориентации интерфейса
+    QSize m_panel;                    // панель в координатах HWC
+    bool m_deviceLayer = false;       // слой DEVICE для растяжения на телефоне
+    int m_sceneRotation = 0;          // корневой Item Qt Quick, сам кадр совпадает с панелью
+    int m_activeConfigId = -1;
+    QList<DeviceProfile::DisplayMode> m_modes;
     ANativeWindowBuffer *m_blank = nullptr;   // чёрный кадр во всю панель — клиентский кадр при отказе (blankFrame)
     ANativeWindowBuffer *blankFrame();
     bool m_refusing = false;              // composer сейчас не берёт слой с растяжением (под m_hwcMutex)
@@ -109,4 +119,15 @@ private:
     int m_framesSinceSwitch = 0;
     int m_rechecks = 0;                   // «не включилась» — проверить заново (замер сразу после старта врёт)
     int64_t m_recheckAt = 0;              // когда, нс CLOCK_MONOTONIC
+
+    // Частота в покое (pipa): 2 с без частых кадров — панель на m_idleHz, первый частый кадр — назад к выбранной.
+    // Кадры, которые рисует сама проверка частоты (driveRefresh), работой не считаются — иначе частота металась бы
+    void driveIdle(int64_t nowNs);
+    std::atomic<int> m_userHz{0};         // выбранная частота (requestRefresh из настроек), 0 — режим панели при старте
+    int m_defaultHz = 0;                  // режим панели при старте (пишется до первого кадра)
+    int m_idleHz = 0;                     // 0 — выключено (NAOMI_IDLE_HZ)
+    int64_t m_lastPresentNs = 0;          // поток отрисовки
+    int64_t m_lastBusyNs = 0;             // последний частый кадр
+    int64_t m_graceUntilNs = 0;           // до этого времени кадры не судим (хвост смены частоты)
+    int m_busyStreak = 0;                 // подряд частых кадров: единичный кадр не выдёргивает из 60 Гц
 };

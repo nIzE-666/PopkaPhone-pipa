@@ -2,7 +2,7 @@
 # НаомиФон — установить оболочку в систему телефона (от root) или убрать.
 #   sudo sh install-shell.sh install     службы naomid, naomi-shell и naomi-safe, автозапуск, repowerd — выкл.
 #   sudo sh install-shell.sh uninstall   вернуть как было (кроме выключенного Lomiri — это lomiri.sh)
-# Файлы берёт из того же каталога: shell-prepare, safescreen.py, hwcspike.py (их кладёт tools/naomi install).
+# Файлы берёт из того же каталога (их кладёт tools/naomi install).
 # Сама оболочка — сборка в /home/phablet/naomi/build (tools/naomi build); службе нужен только путь.
 # Служба железа naomid работает от root — её программа копируется из сборки в $LIB (из домашней папки
 # root ничего не запускает).
@@ -38,26 +38,37 @@ install_runtime() {
 }
 
 rw() {
+    case ",$(findmnt -n -o OPTIONS /)," in *,rw,*) return ;; esac
     mount -o remount,rw /
     trap 'sync; mount -o remount,ro / || echo "внимание: корень остался на запись" >&2' EXIT
 }
 
 case "${1:-}" in
 install)
+    [ -x "$BUILD/naomid/naomid" ] || { echo "нет $BUILD/naomid/naomid — сначала соберите оболочку" >&2; exit 1; }
+    TARGET=$(timeout 5 runuser -u phablet -- "$BUILD/naomid/naomid" --device)
+    case "$TARGET" in pipa|redfin) ;; *) echo "неизвестное устройство: $TARGET" >&2; exit 1 ;; esac
     rw
-    # Журнал systemd — в памяти: на корне (3,4 ГБ, только для чтения) он дорос до 216 МБ и забил его
-    # до 100% — писал, пока корень был открыт на запись.
-    mkdir -p /etc/systemd/journald.conf.d
-    printf '# НаомиФон: журнал в памяти (корень маленький и только для чтения)\n[Journal]\nStorage=volatile\nRuntimeMaxUse=64M\n' \
-        > /etc/systemd/journald.conf.d/90-naomi.conf
-    rm -rf /var/log/journal/*
-    systemctl restart systemd-journald
+    if [ "$TARGET" = redfin ]; then
+        # Журнал systemd — в памяти: на корне (3,4 ГБ, только для чтения) он дорос до 216 МБ и забил его
+        # до 100% — писал, пока корень был открыт на запись.
+        mkdir -p /etc/systemd/journald.conf.d
+        printf '# НаомиФон: журнал в памяти (корень маленький и только для чтения)\n[Journal]\nStorage=volatile\nRuntimeMaxUse=64M\n' \
+            > /etc/systemd/journald.conf.d/90-naomi.conf
+        rm -rf /var/log/journal/*
+        systemctl restart systemd-journald
+    fi
     install_runtime
-    mkdir -p "$LIB" /etc/systemd/logind.conf.d
+    mkdir -p "$LIB"
     install -m 755 "$SRC/shell-prepare" "$LIB/shell-prepare"
-    install -m 644 "$SRC/safescreen.py" "$SRC/hwcspike.py" "$SRC/blackbox.py" "$LIB/"
-    [ -x "$BUILD/naomid/naomid" ] || { echo "нет $BUILD/naomid/naomid — сначала tools/naomi build" >&2; exit 1; }
+    install -m 755 "$SRC/naomi-telegram" "$LIB/naomi-telegram"
+    install -m 755 "$SRC/naomi-deepseek" "$LIB/naomi-deepseek"
+    [ -f "$SRC/naomi-camera" ] && install -m 755 "$SRC/naomi-camera" "$LIB/naomi-camera"
     install -m 755 "$BUILD/naomid/naomid" "$LIB/naomid"
+    if [ "$TARGET" = pipa ]; then
+        install -m 755 "$SRC/naomi-pipa-slot-switch" "$LIB/naomi-pipa-slot-switch"
+    fi
+    printf 'NAOMI_DEVICE=%s\n' "$TARGET" > "$LIB/device.env"
 
     # шина: имя org.naomi.Phone — только root, звать и слушать службу — только phablet и root
     cat > "$BUS_POLICY" <<'EOF'
@@ -92,6 +103,7 @@ Before=naomi-shell.service
 [Service]
 Type=dbus
 BusName=org.naomi.Phone
+EnvironmentFile=/usr/local/lib/naomi/device.env
 # звук — в сеансе phablet: службе нужен его ключ PulseAudio, причём открываемый на запись (иначе
 # libpulse его не берёт), а дом ей — только читать. Копия ключа — в /run/naomid (до запуска, без ограничений)
 RuntimeDirectory=naomid
@@ -107,40 +119,44 @@ PrivateTmp=yes
 [Install]
 WantedBy=multi-user.target
 EOF
-    # кнопку питания обрабатывает оболочка; иначе logind по ней выключает телефон
-    printf '# НаомиФон: кнопку питания обрабатывает оболочка (naomi-shell), не logind\n[Login]\nHandlePowerKey=ignore\nHandlePowerKeyLongPress=ignore\n' \
-        > /etc/systemd/logind.conf.d/90-naomi.conf
-    # второй интерфейс Wi-Fi (wlan1) — без NetworkManager: тот, пока wlan1 ни к чему не подключён, сам запускал на нём
-    # поиск сетей — радио на 3 с уходило с рабочего канала, и трансляция стола по Wi-Fi вставала на 50–130 мс по
-    # нескольку раз подряд (docs/STREAM.md, «Сканы wlan1»). Сеть телефона — wlan0, wlan1 ничем не занят
-    mkdir -p /etc/NetworkManager/conf.d
-    printf '%s\n' '# НаомиФон: wlan1 не занят — без поиска сетей на нём (docs/STREAM.md, «Сканы wlan1»)' '[keyfile]' \
-        'unmanaged-devices=interface-name:wlan1' > "$NM_WLAN1"
-    nmcli general reload conf >/dev/null 2>&1 || true
-    nmcli device set wlan1 managed no >/dev/null 2>&1 || true
-    # последний ряд сенсора (y 2339) — внутрь окна оболочки: Qt переводит его в точку 850,55 при окне в 851 точку и
-    # округляет до 851 — касание «ниже окна» выбрасывается целиком, и смах «домой» от самого края не срабатывал
-    # (docs/SHELL.md, «Жест от самого края»). Сжатие по высоте на 0,05 % — внизу меньше точки панели.
-    printf '%s\n' '# НаомиФон: последний ряд сенсора — внутрь окна оболочки (docs/SHELL.md, «Жест от самого края»)' \
-        'ACTION=="add|change", KERNEL=="event*", ATTRS{name}=="sec_touchscreen|naomi-virtual-touch", ENV{LIBINPUT_CALIBRATION_MATRIX}="1 0 0 0 0.9995 0"' \
-        > "$TOUCH_RULE"
-    udevadm control --reload
-    udevadm trigger --action=change --subsystem-match=input
-    # Громкость динамика — в PulseAudio, а не в драйвере (hw_volume=false у pulseaudio-modules-droid): драйвер Qualcomm
-    # громкость, присланную, пока поток спит, при его запуске не применяет («Playback 9 Volume» = 0) — динамик после
-    # 5 с тишины играл на 100 %, а шторка показывала, например, 20 % (docs/NAOMID.md, «Громкость динамика»).
-    # Действует со следующего запуска PulseAudio (перезагрузка или systemctl --user restart pulseaudio)
-    # Клавиатуры и мыши Bluetooth: в ядре порта нет HIDP (CONFIG_BT_HIDP), BlueZ ведёт их сам через /dev/uhid, а тот —
-    # system:system 0660 (так его ставит Android). bluetoothd — root без CAP_DAC_OVERRIDE и без групп: открыть не мог
-    # и молча уходил на HIDP («ioctl_connadd(): Protocol not supported») — docs/DESKTOP.md, «Клавиатура Bluetooth».
-    # Действует со следующего запуска bluetoothd (перезагрузка или systemctl restart bluetooth)
-    mkdir -p "$(dirname "$BT_DROPIN")"
-    printf '%s\n' '# НаомиФон: bluetoothd открывает /dev/uhid (system:system) — клавиатуры и мыши Bluetooth' \
-        '[Service]' 'SupplementaryGroups=system' > "$BT_DROPIN"
-    mkdir -p "$(dirname "$PA_DROPIN")"
-    printf '%s\n' '# НаомиФон: громкость динамика — в PulseAudio, не в драйвере (docs/NAOMID.md, «Громкость динамика»)' \
-        '[Service]' 'Environment=PULSE_MODULES_DROID_EXTRA_CARD_ARGS=hw_volume=false' > "$PA_DROPIN"
-    runuser -u phablet -- env XDG_RUNTIME_DIR=/run/user/32011 systemctl --user daemon-reload || true
+    if [ "$TARGET" = redfin ]; then
+        mkdir -p /etc/systemd/logind.conf.d
+        install -m 644 "$SRC/safescreen.py" "$SRC/hwcspike.py" "$SRC/blackbox.py" "$LIB/"
+        # кнопку питания обрабатывает оболочка; иначе logind по ней выключает телефон
+        printf '# НаомиФон: кнопку питания обрабатывает оболочка (naomi-shell), не logind\n[Login]\nHandlePowerKey=ignore\nHandlePowerKeyLongPress=ignore\n' \
+            > /etc/systemd/logind.conf.d/90-naomi.conf
+        # второй интерфейс Wi-Fi (wlan1) — без NetworkManager: тот, пока wlan1 ни к чему не подключён, сам запускал на нём
+        # поиск сетей — радио на 3 с уходило с рабочего канала, и трансляция стола по Wi-Fi вставала на 50–130 мс по
+        # нескольку раз подряд (docs/STREAM.md, «Сканы wlan1»). Сеть телефона — wlan0, wlan1 ничем не занят
+        mkdir -p /etc/NetworkManager/conf.d
+        printf '%s\n' '# НаомиФон: wlan1 не занят — без поиска сетей на нём (docs/STREAM.md, «Сканы wlan1»)' '[keyfile]' \
+            'unmanaged-devices=interface-name:wlan1' > "$NM_WLAN1"
+        nmcli general reload conf >/dev/null 2>&1 || true
+        nmcli device set wlan1 managed no >/dev/null 2>&1 || true
+        # последний ряд сенсора (y 2339) — внутрь окна оболочки: Qt переводит его в точку 850,55 при окне в 851 точку и
+        # округляет до 851 — касание «ниже окна» выбрасывается целиком, и смах «домой» от самого края не срабатывал
+        # (docs/SHELL.md, «Жест от самого края»). Сжатие по высоте на 0,05 % — внизу меньше точки панели.
+        printf '%s\n' '# НаомиФон: последний ряд сенсора — внутрь окна оболочки (docs/SHELL.md, «Жест от самого края»)' \
+            'ACTION=="add|change", KERNEL=="event*", ATTRS{name}=="sec_touchscreen|naomi-virtual-touch", ENV{LIBINPUT_CALIBRATION_MATRIX}="1 0 0 0 0.9995 0"' \
+            > "$TOUCH_RULE"
+        udevadm control --reload
+        udevadm trigger --action=change --subsystem-match=input
+        # Громкость динамика — в PulseAudio, а не в драйвере (hw_volume=false у pulseaudio-modules-droid): драйвер Qualcomm
+        # громкость, присланную, пока поток спит, при его запуске не применяет («Playback 9 Volume» = 0) — динамик после
+        # 5 с тишины играл на 100 %, а шторка показывала, например, 20 % (docs/NAOMID.md, «Громкость динамика»).
+        # Действует со следующего запуска PulseAudio (перезагрузка или systemctl --user restart pulseaudio)
+        # Клавиатуры и мыши Bluetooth: в ядре порта нет HIDP (CONFIG_BT_HIDP), BlueZ ведёт их сам через /dev/uhid, а тот —
+        # system:system 0660 (так его ставит Android). bluetoothd — root без CAP_DAC_OVERRIDE и без групп: открыть не мог
+        # и молча уходил на HIDP («ioctl_connadd(): Protocol not supported») — docs/DESKTOP.md, «Клавиатура Bluetooth».
+        # Действует со следующего запуска bluetoothd (перезагрузка или systemctl restart bluetooth)
+        mkdir -p "$(dirname "$BT_DROPIN")"
+        printf '%s\n' '# НаомиФон: bluetoothd открывает /dev/uhid (system:system) — клавиатуры и мыши Bluetooth' \
+            '[Service]' 'SupplementaryGroups=system' > "$BT_DROPIN"
+        mkdir -p "$(dirname "$PA_DROPIN")"
+        printf '%s\n' '# НаомиФон: громкость динамика — в PulseAudio, не в драйвере (docs/NAOMID.md, «Громкость динамика»)' \
+            '[Service]' 'Environment=PULSE_MODULES_DROID_EXTRA_CARD_ARGS=hw_volume=false' > "$PA_DROPIN"
+        runuser -u phablet -- env XDG_RUNTIME_DIR=/run/user/32011 systemctl --user daemon-reload || true
+    fi
 
     cat > "$UNITS/naomi-shell.service" <<'EOF'
 # НаомиФон — оболочка (docs/SHELL.md, «Служба»)
@@ -155,14 +171,17 @@ OnFailure=naomi-safe.service
 
 [Service]
 Type=simple
+Nice=-5
 User=phablet
 Group=phablet
 SupplementaryGroups=android_input android_graphics video audio input
 WorkingDirectory=/home/phablet/naomi
+Environment=LANG=C.UTF-8 LC_ALL=C.UTF-8
 Environment=EGL_PLATFORM=hwcomposer QT_QPA_PLATFORM=eglfs QT_QPA_EGLFS_INTEGRATION=eglfs_naomi
-Environment=QT_QPA_EGLFS_HIDECURSOR=1 QT_PLUGIN_PATH=/home/phablet/naomi/build/plugins
+Environment=QT_PLUGIN_PATH=/home/phablet/naomi/build/plugins
 Environment=XDG_RUNTIME_DIR=/run/user/32011 DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/32011/bus
 Environment=NAOMI_FRAMESTATS=1
+EnvironmentFile=/usr/local/lib/naomi/device.env
 EnvironmentFile=-/home/phablet/naomi/shell.env
 ExecStartPre=+/usr/local/lib/naomi/shell-prepare
 ExecStart=/home/phablet/naomi/build/app/naomi-shell
@@ -182,6 +201,27 @@ SuccessExitStatus=75
 [Install]
 WantedBy=graphical.target
 EOF
+    if [ "$TARGET" = pipa ]; then
+        sed -i '/^OnFailure=naomi-safe.service$/d' "$UNITS/naomi-shell.service"
+        sed -i '/^\[Unit\]$/a After=repowerd.service naomi-pipa-awake.service\nConflicts=repowerd.service\nWants=naomi-pipa-awake.service' \
+            "$UNITS/naomi-shell.service"
+        cat > "$UNITS/naomi-pipa-awake.service" <<'EOF'
+[Unit]
+Description=Keep the Xiaomi Pad 6 awake during the NaomiPhone session
+After=systemd-logind.service
+PartOf=naomi-shell.service
+StopWhenUnneeded=yes
+
+[Service]
+# Удерживаем также блокировку autosleep ядра Halium, если интерфейс доступен.
+ExecStartPre=-/bin/sh -c 'if [ -w /sys/power/wake_lock ] && [ -w /sys/power/wake_unlock ]; then echo naomi-pipa > /sys/power/wake_lock; fi'
+ExecStart=/usr/bin/systemd-inhibit --what=sleep:idle:handle-power-key --mode=block --who=NaomiPhone --why "Tablet display session" /usr/bin/sleep infinity
+ExecStopPost=-/bin/sh -c 'if [ -w /sys/power/wake_unlock ]; then echo naomi-pipa > /sys/power/wake_unlock; fi'
+EOF
+        systemctl daemon-reload
+        echo 'pipa: службы установлены. Первый запуск вручную после остановки владельца дисплея.'
+        exit 0
+    fi
 
     cat > "$UNITS/naomi-safe.service" <<'EOF'
 # НаомиФон — безопасный режим: оболочка упала 4 раза за минуту. Экран-заглушка, SSH и ADB работают.
@@ -224,6 +264,15 @@ EOF
     ;;
 uninstall)
     rw
+    if [ "$(cat "$LIB/device.env" 2>/dev/null || true)" = NAOMI_DEVICE=pipa ]; then
+        systemctl disable --now naomi-shell.service naomid.service >/dev/null 2>&1 || true
+        systemctl stop naomi-pipa-awake.service >/dev/null 2>&1 || true
+        rm -f "$UNITS/naomi-shell.service" "$UNITS/naomid.service" "$UNITS/naomi-pipa-awake.service" "$BUS_POLICY"
+        rm -rf "$LIB"
+        systemctl daemon-reload
+        systemctl reload dbus
+        exit 0
+    fi
     systemctl disable --now naomi-shell.service naomid.service naomi-blackbox.service >/dev/null 2>&1 || true
     systemctl stop naomi-safe.service 2>/dev/null || true
     # пороги заряда, что ставила naomid (docs/NAOMID.md, «Заряд»), — как с завода: без предела, защита ядра от жары

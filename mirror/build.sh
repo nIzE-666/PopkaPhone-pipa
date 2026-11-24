@@ -30,7 +30,8 @@ trap 'rm -f home.json' EXIT
   --icon=icon.icns --out=dist --overwrite --app-bundle-id="$ID" \
   --app-category-type=public.app-category.developer-tools --darwin-dark-mode-support \
   --usage-description.LocalNetwork="NaomiPhone Mirror shows your phone's screen and controls it over the local network (the cable or Wi-Fi)." \
-  --ignore='^/dist' --ignore='^/node_modules' --ignore='^/make_icon\.py' --ignore='^/build\.sh' --ignore='^/icon\.(icns|png)$' >/dev/null
+  --ignore='^/dist' --ignore='^/node_modules' --ignore='^/tests' --ignore='^/make_icon\.py' \
+  --ignore='^/build\.sh$' --ignore='^/build-win\.ps1$' --ignore='^/icon\.(icns|ico|png)$' >/dev/null
 BUILT="$(ls -d "dist/$NAME-darwin-"*/"$NAME.app" | head -1)"
 
 # Свои UUID исполняемых файлов: у приложений на одном Electron они одинаковые, и macOS по UUID путает, чьё разрешение

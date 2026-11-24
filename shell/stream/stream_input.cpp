@@ -113,8 +113,8 @@ void StreamInput::pointer(int buttons, double x, double y)
 {
     if (!m_desktop)
         return;   // экрану телефона мышь — пальцем (Touch)
-    const QPointF p = toDesktop(x, y);
-    m_pointerAt = p;
+    m_pointerAt = toDesktop(x, y);
+    const QPointF p = m_desktop->mapToWindow(m_pointerAt);
     const Qt::KeyboardModifiers mods((buttons & stream::PointerShift ? Qt::ShiftModifier : Qt::NoModifier)
                                      | (buttons & stream::PointerCtrl ? Qt::ControlModifier : Qt::NoModifier)
                                      | (buttons & stream::PointerAlt ? Qt::AltModifier : Qt::NoModifier));
@@ -278,7 +278,7 @@ void StreamInput::scroll(double x, double y, double dx, double dy, int phase)
 {
     if (m_desktop) {   // стол: колесо с точным сдвигом там, где мышь
         const QSize l = m_desktop->logicalSize();
-        const QPointF p = phase == stream::ScrollEnd ? m_pointerAt : toDesktop(x, y);
+        const QPointF p = m_desktop->mapToWindow(phase == stream::ScrollEnd ? m_pointerAt : toDesktop(x, y));
         const QPoint pixel(qRound(-dx * l.width()), qRound(-dy * l.height()));
         QWheelEvent e(p, p, pixel, pixel * 8, Qt::NoButton, Qt::NoModifier,
                       phase == stream::ScrollEnd ? Qt::ScrollEnd : Qt::ScrollUpdate, false);
@@ -353,7 +353,8 @@ void StreamInput::key(bool down, int qtKey, int modifiers, const QString &text)
     // по латинице на клавише. Сочетание — столу, даже когда в фокусе браузер; его отпускание — тоже (Shift или Alt
     // могли отпустить раньше цифры). Esc при прицеле — отмена прицела, а не клавиша программе
     if (m_desktop && (qtKey == Qt::Key_3 || qtKey == Qt::Key_4)) {
-        const int mods = modifiers & (Qt::ShiftModifier | Qt::AltModifier | Qt::ControlModifier | Qt::MetaModifier);
+        const auto mods = Qt::KeyboardModifiers::fromInt(modifiers)
+                          & (Qt::ShiftModifier | Qt::AltModifier | Qt::ControlModifier | Qt::MetaModifier);
         if (down && (mods == (Qt::ShiftModifier | Qt::AltModifier) || mods == (Qt::ShiftModifier | Qt::MetaModifier))) {
             if (!m_shotKeys.contains(qtKey)) {   // держат — повтор клавиатуры, а снимок один
                 m_shotKeys.append(qtKey);

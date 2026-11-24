@@ -1,0 +1,21 @@
+[Unit]
+Description=Pipa Telegram Control Hub Bot (Xiaomi Pad 6)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=%h/.local/share/pipa-bot/app
+Environment=PYTHONUNBUFFERED=1
+Environment=XDG_RUNTIME_DIR=/run/user/32011
+Environment=DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/32011/bus
+EnvironmentFile=%h/.config/pipa-bot/bot.env
+ExecStartPre=-/bin/sh -c 'sudo -n systemctl start popka-vpn-core.service 2>/dev/null || true'
+ExecStart=%h/.local/share/pipa-bot/venv/bin/python %h/.local/share/pipa-bot/app/bot.py
+Restart=always
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=default.target

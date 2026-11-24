@@ -20,7 +20,7 @@ QString readAll(const QString &path)
 // вид сети по имени интерфейса: wlan — Wi-Fi, usb/rndis — кабель разработчика, rmnet — мобильная
 QString kindOf(const QString &iface)
 {
-    if (iface.startsWith("wlan"))
+    if (iface.startsWith("wl"))
         return "wifi";
     if (iface.startsWith("usb") || iface.startsWith("rndis"))
         return "cable";

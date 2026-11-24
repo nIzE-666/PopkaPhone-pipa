@@ -11,14 +11,24 @@ Item {
     property string page
     signal pick(string id)
     // разделы и подразделы — по порядку; main — раздел (под ним — его подразделы)
-    readonly property var items: [
+    readonly property var allItems: [
         { id: "screen", name: "Экран", main: true }, { id: "wall", name: "Обои" }, { id: "lock", name: "Без дока" },
         { id: "mouse", name: "Мышь", main: true }, { id: "more", name: "Подробно" },
         { id: "touch", name: "Трекпад", main: true },
         { id: "battery", name: "Батарея", main: true }, { id: "health", name: "Здоровье" },
         { id: "pad", name: "Геймпад", main: true }]
-    readonly property int mainH: 34
-    readonly property int subH: 28
+    readonly property var items: {
+        if (!DeskStyle.tablet)
+            return allItems
+        const tabletItems = allItems.filter(it => !["lock", "touch"].includes(it.id))
+        tabletItems.splice(2, 0, { id: "interface", name: "Интерфейс", main: true })
+        tabletItems.push({ id: "system", name: "Система", main: true })
+        if (naomiSystemTools.vpnAvailable)
+            tabletItems.push({ id: "vpn", name: "VPN", main: true })
+        return tabletItems
+    }
+    readonly property int mainH: DeskStyle.tablet ? 44 : 34
+    readonly property int subH: DeskStyle.tablet ? 40 : 28
     readonly property int groupGap: 6
     readonly property real axisX: 14.5                    // ось — середина делений
     // где строка: сверху вниз, между разделами — groupGap

@@ -1,0 +1,25 @@
+#!/bin/sh
+# Telegram Desktop uses Qt's Wayland input context for desktop and tablet keyboards.
+set -eu
+export WAYLAND_DISPLAY="${WAYLAND_DISPLAY:-wayland-naomi}"
+export QT_QPA_PLATFORM=wayland
+# Use shared-memory buffers on Halium, where Telegram's EGL swapchain fails.
+export QT_WAYLAND_CLIENT_BUFFER_INTEGRATION=none
+export QT_WAYLAND_DISABLE_WINDOWDECORATION=1
+export QT_IM_MODULES=wayland
+export QT_IM_MODULE=wayland
+export QT_WAYLAND_TEXT_INPUT_PROTOCOL=zwp_text_input_v3
+
+# AppLauncher supplies QT_SCALE_FACTOR (the desktop's DPR).
+root="$HOME/naomi/opt/telegram-desktop"
+program="$root/usr/bin/telegram-desktop"
+if [ -x "$program" ]; then
+    export LD_LIBRARY_PATH="$root/usr/lib/$(uname -m)-linux-gnu${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+    exec "$program" -noupdate "$@"
+fi
+
+if ! program=$(command -v telegram-desktop); then
+    echo "Telegram Desktop is not installed" >&2
+    exit 127
+fi
+exec "$program" "$@"

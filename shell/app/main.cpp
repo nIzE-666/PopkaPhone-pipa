@@ -21,6 +21,7 @@
 #include "desk_probe.h"
 #include "desk_shot.h"
 #include "desktop_screen.h"
+#include "device_profile.h"
 #include "game_library.h"
 #include "pad_keys.h"
 #include "sound_equalizer.h"
@@ -35,10 +36,12 @@
 #include "preview_service.h"
 #include "preview_video.h"
 #include "power.h"
+#include "haptics.h"
 #include "project_file.h"
 #include "spell.h"
 #include "stream_service.h"
 #include "system_stats.h"
+#include "system_tools.h"
 #include "unix_signals.h"
 #include "video_plane.h"
 #include "term_link.h"
@@ -52,12 +55,14 @@
 #include <QDBusServiceWatcher>
 #include <QFont>
 #include <QGuiApplication>
+#include <QPointer>
 #include <QScreen>
 #include <QQmlApplicationEngine>
 #include <QQmlContext>
 #include <QQuickImageProvider>
 #include <QQuickWindow>
 #include <QWaylandCompositor>
+#include <QWaylandQuickOutput>
 #include <QWaylandViewporter>
 #include <QtPlugin>
 
@@ -88,6 +93,7 @@ int main(int argc, char **argv)
     QGuiApplication::setFont(QFont(QStringLiteral("Google Sans")));   // где шрифт не задан (Theme.sans); иначе — DejaVu Sans
 
     const QString waylandSocket = "wayland-naomi";
+    const auto &profile = DeviceProfile::current();
     // плотность — от драйвера экрана (2,75 на полной ширине, меньше — в той же доле): у программ та же
     const double density = app.primaryScreen()->devicePixelRatio();
 
@@ -95,13 +101,39 @@ int main(int argc, char **argv)
     DisplayStats stats;
     PhoneClient phone;
     SystemStats system;
+    SystemTools systemTools(profile.tablet);
     Power power;
+    Haptics haptics;   // вибромотор: отклик клавиатуры (haptics.h)
+    auto *keyboard = KeyboardContext::instance();
+    if (profile.tablet && keyboard) {
+        keyboard->setManualOnly(true);
+        keyboard->setDismissOnFocusLoss(true);
+        QObject::connect(&power, &Power::displayOnChanged, keyboard, [&power, keyboard] {
+            if (!power.displayOn())
+                keyboard->hideInputPanel();
+        });
+    }
     AppLauncher apps(waylandSocket, density);
     AndroidApps android(waylandSocket);   // Android-приложения (Waydroid, docs/ANDROID.md)
     GameLibrary games;                    // игры стола (docs/GAMES.md)
     PadKeys padKeys(&games);              // кнопки геймпада клавишами (docs/GAMES.md, «Кнопки геймпада»)
     ProjectFile project;
     StreamService streamService;   // трансляция экрана на Mac (docs/STREAM.md)
+    if (profile.tablet && keyboard) {
+        QPointer<StreamService> stream(&streamService);
+        keyboard->setKeyFallback([stream](bool down, int qtKey, int modifiers, const QString &text) {
+            if (stream)
+                stream->injectKey(down, qtKey, modifiers, text);
+        });
+        QObject::connect(keyboard, &KeyboardContext::layoutChanged, &streamService, [keyboard, &streamService] {
+            if (!streamService.layout().isEmpty())
+                streamService.setLayout(keyboard->layout());
+        });
+        QObject::connect(&streamService, &StreamService::layoutChanged, keyboard, [keyboard, &streamService] {
+            if (!streamService.layout().isEmpty())
+                keyboard->setLayout(streamService.layout());
+        });
+    }
     FilesService files;            // «Файлы» рабочего стола (docs/FILES.md)
     PreviewService preview;        // «Просмотр» стола: фото и видео (docs/DESKTOP.md, «Просмотр»)
     WebLink web;                   // связь стола с «Браузером» (docs/WEB.md)
@@ -136,14 +168,16 @@ int main(int argc, char **argv)
     QQmlContext *ctx = engine.rootContext();
     ctx->setContextProperty("naomiDisplay", &stats);
     ctx->setContextProperty("naomiPower", &power);
+    ctx->setContextProperty("naomiHaptics", &haptics);
     ctx->setContextProperty("naomiPhone", &phone);
     ctx->setContextProperty("naomiSystem", &system);
+    ctx->setContextProperty("naomiSystemTools", &systemTools);
     ctx->setContextProperty("naomiApps", &apps);
     ctx->setContextProperty("naomiAndroid", &android);
     ctx->setContextProperty("naomiGames", &games);
     ctx->setContextProperty("naomiPadKeys", &padKeys);
     ctx->setContextProperty("naomiProject", &project);
-    ctx->setContextProperty("naomiKeyboard", KeyboardContext::instance());
+    ctx->setContextProperty("naomiKeyboard", keyboard);
     ctx->setContextProperty("naomiSpell", &spell);
     ctx->setContextProperty("naomiStream", &streamService);
     ctx->setContextProperty("naomiFiles", &files);
@@ -152,19 +186,24 @@ int main(int argc, char **argv)
     ctx->setContextProperty("naomiTerm", &term);
     ctx->setContextProperty("naomiForce", &force);
     ctx->setContextProperty("naomiDensity", density);
+    ctx->setContextProperty("naomiTablet", profile.tablet);
     ctx->setContextProperty("naomiWaylandSocket", waylandSocket);
     ctx->setContextProperty("naomiTrace", trace.get());
     QObject::connect(&engine, &QQmlEngine::quit, &app, &QGuiApplication::quit);
 
     const QString qml = qEnvironmentVariable("NAOMI_QML", app.applicationDirPath() + "/qml/Main.qml");
     engine.load(QUrl::fromLocalFile(qml));
-    QQuickWindow *window = nullptr;
-    for (QWindow *w : app.topLevelWindows())
-        if ((window = qobject_cast<QQuickWindow *>(w)))
-            break;
-    if (!window)
-        return 1;
     auto *compositor = qobject_cast<QWaylandCompositor *>(engine.rootObjects().value(0));
+    auto *output = compositor ? qobject_cast<QWaylandQuickOutput *>(compositor->property("displayOutput").value<QObject *>())
+                              : nullptr;
+    auto *window = output ? qobject_cast<QQuickWindow *>(output->window()) : nullptr;
+    if (!window) {
+        for (QWindow *w : app.topLevelWindows())
+            if ((window = qobject_cast<QQuickWindow *>(w)))
+                break;
+    }
+    if (!window || (profile.tablet && !output))
+        return 1;
     apps.setCompositor(compositor);
     force.setCompositor(compositor);
     android.setCompositor(compositor);
@@ -183,10 +222,11 @@ int main(int argc, char **argv)
         }, Qt::DirectConnection);
 
     power.attach(window);
-    // рабочий стол — второй экран только для трансляции (docs/DESKTOP.md): 1280 × 720 точек, кадр 1920 × 1080; высоту
-    // потом задаёт форма окна зрителя (DeskSize)
+    // На планшете стол занимает панель; у телефона размер второго вывода задаёт зритель.
     SystemMonitor monitor;   // монитор системы — окно под индикатором подключения; живёт дольше сцены стола
-    DesktopScreen desktop(&engine, app.applicationDirPath() + "/qml/desktop/Desktop.qml", QSize(1280, 720), 1.5);
+    DesktopScreen desktop(&engine, app.applicationDirPath() + "/qml/desktop/Desktop.qml",
+                          profile.tablet ? window->screen()->size() : QSize(1280, 720), profile.tablet ? density : 1.5,
+                          profile.tablet ? window : nullptr, stats.sceneRotation());
     ctx->setContextProperty("naomiDesk", &desktop);   // масштаб стола — программам стола (Desktop.qml)
     monitor.setDesk(&desktop);
     ctx->setContextProperty("naomiMonitor", &monitor);
@@ -197,11 +237,24 @@ int main(int argc, char **argv)
     desktop.setPhoneWindow(window);
     new DeskProbe(&desktop, &web, &app);   // зонд стола для замеров по SSH (desk_probe.h, tools/deskbench)
     if (compositor)
-        desktop.setCompositor(compositor);
+        desktop.setCompositor(compositor, output);
+    if (profile.tablet) {
+        desktop.setNativeRefreshRate(window->screen()->refreshRate());
+        QObject::connect(&stats, &DisplayStats::changed, &desktop, [&] { desktop.setNativeRefreshRate(stats.refreshHz()); });
+        if (!desktop.showNative())
+            return 1;
+    }
     android.setDeskOutput(desktop.output());   // Android видит из выводов только стол (android_apps.h)
     android.setWinOutput(desktop.winOutput(), [&apps](qint64 pid) { return apps.deskApp(pid) == QLatin1String("win"); });
-    streamService.attachDesktop(&desktop);
-    streamService.attach(window);
+    if (!profile.tablet)
+        streamService.attachDesktop(&desktop);
+    streamService.attach(window, profile.tablet ? &desktop : nullptr, stats.sceneRotation());
+    if (profile.tablet) {
+        QObject::connect(&stats, &DisplayStats::sceneRotationChanged, &desktop, [&] {
+            desktop.setSceneRotation(stats.sceneRotation());
+            streamService.setNativeRotation(stats.sceneRotation());
+        });
+    }
     QObject::connect(&streamService, &StreamService::activity, &power, &Power::activity);
     // Стол без зрителя (docs/WEB.md, «Без зрителя»): зритель ушёл сам — ролики браузера на паузу, через 2 минуты
     // браузер заморожен; трансляцию выключили (плитка в шторке) — заморожен сразу: страницы, потом ядром — все
@@ -227,8 +280,8 @@ int main(int argc, char **argv)
             holdFull();
     });
     auto deskState = [&] {
-        web.setDesk(streamService.enabled(), streamService.connected());
-        const bool watched = streamService.connected() && streamService.desktop();
+        web.setDesk(profile.tablet || streamService.enabled(), profile.tablet || streamService.connected());
+        const bool watched = profile.pixel && streamService.connected() && streamService.desktop();
         apps.setDeskBoost(watched);
         if (watched != full) {
             full = watched;

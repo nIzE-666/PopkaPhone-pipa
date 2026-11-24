@@ -1,10 +1,12 @@
 #include "desktop_screen.h"
+#include "scene_rotation.h"
+#include "naomi_display.h"
 
 #include <QAbstractAnimation>
-#include <QDir>
 #include <QFocusEvent>
 #include <QGuiApplication>
 #include <QImage>
+#include <QTransform>
 #include <QLoggingCategory>
 #include <QOffscreenSurface>
 #include <QOpenGLContext>
@@ -321,14 +323,22 @@ bool DesktopScreen::setTrace(const QString &path, bool scene)
     return path.isEmpty() || g_trace;
 }
 
-DesktopScreen::DesktopScreen(QQmlEngine *engine, const QString &qml, QSize logical, qreal dpr, QObject *parent)
+DesktopScreen::DesktopScreen(QQmlEngine *engine, const QString &qml, QSize logical, qreal dpr,
+                             QQuickWindow *nativeWindow, int sceneRotation, QObject *parent)
     : QObject(parent)
     , m_engine(engine)
     , m_qml(qml)
-    , m_logical(logical)
-    , m_pixels(frameSize(logical, dpr))
+    , m_logical(SceneRotation::isLandscape(sceneRotation) ? logical.transposed() : logical)
+    , m_pixels(frameSize(m_logical, dpr))
     , m_dpr(dpr)
+    , m_native(nativeWindow != nullptr)
+    , m_sceneRotation(sceneRotation)
 {
+    if (m_native) {
+        m_window = nativeWindow;
+        m_window->resize(logical);
+        return;
+    }
     m_frame.setSingleShot(true);
     m_frame.setTimerType(Qt::PreciseTimer);
     // кадр стола — не чаще 90 в секунду (NAOMI_DESK_FPS — иначе: разведка «реже, но чище»; зритель — Want)
@@ -353,11 +363,13 @@ DesktopScreen::DesktopScreen(QQmlEngine *engine, const QString &qml, QSize logic
 
 DesktopScreen::~DesktopScreen()
 {
-    setClock(false);
+    if (m_ownClock)
+        setClock(false);
     if (m_incubator && m_engine->incubationController() == m_incubator)
         m_engine->setIncubationController(nullptr);   // движок переживёт стол
     delete m_root;
-    delete m_window;
+    if (!m_native)
+        delete m_window;
     delete m_control;
     // текстура и контекст — до выхода процесса (контекст уходит вместе с ним)
 }
@@ -366,14 +378,15 @@ DesktopScreen::~DesktopScreen()
 // стол показывает её буфер 1:1 — как окна программ на телефоне (docs/SHELL.md, «Окна программ»). «Рисуй дальше»
 // (frame callback) стол шлёт сам — сразу после sync, а не после отрисовки, как Qt (render): программа рисует свой
 // кадр, пока стол рисует свой. Место — ниже экрана телефона: выводы не перекрываются.
-void DesktopScreen::setCompositor(QWaylandCompositor *compositor)
+void DesktopScreen::setCompositor(QWaylandCompositor *compositor, QWaylandQuickOutput *nativeOutput)
 {
     m_compositor = compositor;
-    m_output = new QWaylandQuickOutput(compositor, m_window);
-    m_output->setAutomaticFrameCallback(false);
+    m_output = m_native ? nativeOutput : new QWaylandQuickOutput(compositor, m_window);
+    Q_ASSERT(m_output);
+    m_output->setAutomaticFrameCallback(m_native);
     m_output->setSizeFollowsWindow(false);
     setOutputMode();
-    m_output->setPosition(QPoint(0, 10000));
+    m_output->setPosition(m_native ? QPoint() : QPoint(0, 10000));
     m_output->setManufacturer(QStringLiteral("Naomi"));
     m_output->setModel(QStringLiteral("desktop"));
     // Вывод для программ Windows (docs/WINDOWS.md, «Выводы»): «экран» 1280 × 720, виден только им (фильтр —
@@ -395,6 +408,58 @@ void DesktopScreen::setCompositor(QWaylandCompositor *compositor)
     m_presentation->initialize();
 }
 
+bool DesktopScreen::showNative()
+{
+    if (!m_native || !loadScene())
+        return false;
+    resizeNative();
+    connect(m_window, &QWindow::widthChanged, this, &DesktopScreen::resizeNative);
+    connect(m_window, &QWindow::heightChanged, this, &DesktopScreen::resizeNative);
+    connect(m_window, &QQuickWindow::frameSwapped, this, [this] {
+        const qint64 now = steadyUs();
+        m_prevUs = now;
+        if (m_presentation)
+            m_presentation->sendFeedback(m_window, ++m_presented, quint64(now / 1000000), quint32(now % 1000000 * 1000));
+    }, Qt::QueuedConnection);
+    m_ready = m_active = true;
+    m_window->showFullScreen();
+    return true;
+}
+
+void DesktopScreen::setSceneRotation(int rotation)
+{
+    if (!m_native || rotation == m_sceneRotation)
+        return;
+    m_sceneRotation = rotation;
+    resizeNative();
+}
+
+void DesktopScreen::resizeNative()
+{
+    const QSize size = SceneRotation::isLandscape(m_sceneRotation) ? m_window->size().transposed() : m_window->size();
+    if (size == m_logical)
+        return;
+    m_logical = size;
+    m_pixels = frameSize(size, m_dpr);
+    m_root->setSize(size);
+    setOutputMode();
+    emit pixelsChanged();
+}
+
+QPointF DesktopScreen::mapToWindow(QPointF point) const
+{
+    return m_native && m_root ? m_root->mapToScene(point) : point;
+}
+
+void DesktopScreen::setNativeRefreshRate(double hz)
+{
+    if (!m_native || hz < 1 || (m_fpsKnown && qRound(hz) == rateHz()))
+        return;
+    m_periodUs = 1000000 / qRound(hz);
+    m_fpsKnown = true;
+    setOutputMode();
+}
+
 QWaylandOutput *DesktopScreen::output() const
 {
     return m_output;
@@ -408,7 +473,8 @@ void DesktopScreen::setOutputMode()
 {
     if (!m_output)
         return;
-    const QWaylandOutputMode mode(m_pixels, m_fpsKnown ? int(1000000000LL / m_periodUs) : 1000);
+    const int millihertz = m_native ? rateHz() * 1000 : m_fpsKnown ? int(1000000000LL / m_periodUs) : 1000;
+    const QWaylandOutputMode mode(m_pixels, millihertz);
     if (!m_output->modes().contains(mode))
         m_output->addMode(mode, m_output->modes().isEmpty());
     m_output->setCurrentMode(mode);
@@ -421,7 +487,7 @@ QSize DesktopScreen::frameSize(QSize logical, double scale)
 
 void DesktopScreen::setGeometry(QSize logical, double scale)
 {
-    if (logical == m_logical && scale == m_dpr)
+    if (m_native || (logical == m_logical && scale == m_dpr))
         return;
     const bool rescaled = scale != m_dpr;
     m_logical = logical;
@@ -530,23 +596,27 @@ bool DesktopScreen::init()
     }
     allocateTarget();
 
-    // обои стола — ~/.config/naomi/desktop/wallpaper.jpg (кладёт tools/naomi desktop-wallpaper); нет — градиент
-    auto *context = new QQmlContext(m_engine->rootContext(), this);
-    context->setContextProperty("deskWallpaper",
-                                QUrl::fromLocalFile(QDir::homePath() + "/.config/naomi/desktop/wallpaper.jpg"));
+    const bool loaded = loadScene();
+    if (loaded) {
+        m_window->contentItem()->setSize(m_logical);
+        // сцена что-то поменяла (анимация, часы, наведение) — кадр
+        connect(m_control, &QQuickRenderControl::renderRequested, this, &DesktopScreen::requestFrame);
+        connect(m_control, &QQuickRenderControl::sceneChanged, this, &DesktopScreen::requestFrame);
+    }
+    m_context->doneCurrent();
+    return loaded;
+}
+
+bool DesktopScreen::loadScene()
+{
     QQmlComponent component(m_engine, QUrl::fromLocalFile(m_qml));
-    m_root = qobject_cast<QQuickItem *>(component.create(context));
+    m_root = qobject_cast<QQuickItem *>(component.create(m_engine->rootContext()));
     if (!m_root) {
         qCWarning(lcDesktop) << "стол:" << component.errors();
         return false;
     }
     m_root->setParentItem(m_window->contentItem());
-    m_window->contentItem()->setSize(m_logical);
     m_root->setSize(m_logical);
-    // сцена что-то поменяла (анимация, часы, наведение) — кадр
-    connect(m_control, &QQuickRenderControl::renderRequested, this, &DesktopScreen::requestFrame);
-    connect(m_control, &QQuickRenderControl::sceneChanged, this, &DesktopScreen::requestFrame);
-    m_context->doneCurrent();
     qCInfo(lcDesktop, "стол %dx%d точек, кадр %dx%d", m_logical.width(), m_logical.height(), m_pixels.width(),
            m_pixels.height());
     return true;
@@ -554,7 +624,7 @@ bool DesktopScreen::init()
 
 void DesktopScreen::setActive(bool on)
 {
-    if (on == m_active)
+    if (m_native || on == m_active)
         return;
     m_active = on;
     if (!on) {
@@ -596,6 +666,10 @@ void DesktopScreen::doneCurrent()
 
 QImage DesktopScreen::grab()
 {
+    if (m_native) {
+        const QImage image = m_window->grabWindow();
+        return m_sceneRotation ? image.transformed(QTransform().rotate(-m_sceneRotation)) : image;
+    }
     if (!m_ready || !m_texture || !makeCurrent())
         return {};
     QImage image = readTexture(QRect(QPoint(), m_pixels));
@@ -629,6 +703,13 @@ bool DesktopScreen::captureNext(const QRect &pixels, std::function<void(QImage)>
 {
     if (!m_active || !m_ready)
         return false;
+    if (m_native) {
+        QTimer::singleShot(0, this, [this, pixels, done = std::move(done)] {
+            const QImage image = grab();
+            done(image.isNull() ? QImage() : image.copy(pixels).flipped(Qt::Vertical));
+        });
+        return true;
+    }
     m_captureRect = pixels;
     m_capture = std::move(done);
     requestFrame();   // сцена могла ничего не просить — кадр всё равно будет
@@ -692,6 +773,15 @@ constexpr qint64 kTickHoldUs = 100000;
 void DesktopScreen::setPulse(bool on)
 {
     m_pulseOn = on;
+    if (m_native) {
+        const auto snapshot = reinterpret_cast<NaomiFrameSnapshotFn>(QGuiApplication::platformFunction(kNaomiFrameSnapshot));
+        NaomiFrameSnapshot stats{};
+        if (snapshot)
+            snapshot(&stats);
+        m_pulseFrames = stats.frames;
+        m_pulseDrops = stats.drops;
+        return;
+    }
     m_pulseWork.clear();
     m_pulseMissed = 0;
     m_pulseTickUs = 0;
@@ -699,6 +789,15 @@ void DesktopScreen::setPulse(bool on)
 
 DesktopScreen::Pulse DesktopScreen::takePulse()
 {
+    if (m_native) {
+        const auto snapshot = reinterpret_cast<NaomiFrameSnapshotFn>(QGuiApplication::platformFunction(kNaomiFrameSnapshot));
+        NaomiFrameSnapshot stats{};
+        if (snapshot)
+            snapshot(&stats);
+        const int frames = int(stats.frames - std::exchange(m_pulseFrames, stats.frames));
+        const int drops = int(stats.drops - std::exchange(m_pulseDrops, stats.drops));
+        return {frames, stats.medianMs, stats.maxMs, drops};
+    }
     Pulse p;
     p.frames = int(m_pulseWork.size());
     p.missed = std::exchange(m_pulseMissed, 0);
@@ -739,6 +838,10 @@ void DesktopScreen::requestFrame()
 {
     if (!m_active || !m_ready)
         return;
+    if (m_native) {
+        m_window->update();
+        return;
+    }
     if (FILE *f = deskTrace(); f && !m_dirty)   // первая просьба после кадра (их сотни за кадр анимации)
         fprintf(f, "q,%lld,0\n", (long long)steadyUs()), fflush(f);
     m_dirty = true;

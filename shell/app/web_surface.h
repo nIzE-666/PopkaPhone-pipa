@@ -21,6 +21,11 @@ public:
 
 protected:
     QSGNode *updatePaintNode(QSGNode *oldNode, UpdatePaintNodeData *data) override;
+    // слой лежит поверх WebSurface и нажатия по содержимому окна Wine получает сам: указатель — в точку нажатия
+    void mousePressEvent(QMouseEvent *event) override;
+
+private:
+    bool m_fresh = true;   // пришёл новый кадр — текстуру грузить заново (solidNode)
 };
 
 // принимает от Qt Wayland вложенные слои элемента (QWaylandQuickItem::subsurfaceHandler) и заводит на них SolidSubsurface
@@ -53,8 +58,11 @@ class WebSurface : public QWaylandQuickShellSurfaceItem
     // сам его не шлёт: прокрутка копилась у Chromium и не доходила до страницы. Только окнам, которые этого просят:
     // клиент, у которого в разборе событий указателя нет frame, на чужом событии упал бы
     Q_PROPERTY(bool pointerFrames MEMBER m_pointerFrames)
+    // Translate touch taps to clicks and swipes to wheel events for Linux desktop apps.
+    Q_PROPERTY(bool touchToPointer READ touchToPointer WRITE setTouchToPointer NOTIFY touchToPointerChanged)
+    Q_PROPERTY(int touchScrollSpeed MEMBER m_touchScrollSpeed)
 public:
-    using QWaylandQuickShellSurfaceItem::QWaylandQuickShellSurfaceItem;
+    explicit WebSurface(QQuickItem *parent = nullptr);
     QRectF outline() const { return m_outline; }
     qreal corner() const { return m_corner; }
     void setOutline(const QRectF &outline);
@@ -63,18 +71,38 @@ public:
     void setPixel(qreal pixel);
     bool opaque() const { return m_opaque; }
     void setOpaque(bool opaque);
+    bool touchToPointer() const { return m_touchToPointer; }
+    void setTouchToPointer(bool enabled);
 
 signals:
     void outlineChanged();
+    void touchToPointerChanged();
+    void pointerPressed();
 
 protected:
     QSGNode *updatePaintNode(QSGNode *oldNode, UpdatePaintNodeData *data) override;
+    void mousePressEvent(QMouseEvent *event) override;
+    void mouseMoveEvent(QMouseEvent *event) override;
+    void mouseReleaseEvent(QMouseEvent *event) override;
+    void touchEvent(QTouchEvent *event) override;
+    void touchUngrabEvent() override;
     void wheelEvent(QWheelEvent *event) override;
 
 private:
+    void sendPointerFrame(QInputEvent *event);
+    void sendPointerFrameForSeat(QWaylandSeat *seat);
+    void resetTouch();
     QRectF m_outline;
     qreal m_corner = 0;
     qreal m_pixel = 0;
     bool m_opaque = false;
+    bool m_fresh = true;   // пришёл новый кадр — текстуру грузить заново (solidNode)
     bool m_pointerFrames = false;
+    bool m_touchToPointer = false;
+    int m_touchScrollSpeed = 100;
+    int m_touchId = -1;
+    QPointF m_touchStart;
+    QPointF m_touchLast;
+    QPointF m_touchScrollRemainder;
+    bool m_touchScrolling = false;
 };

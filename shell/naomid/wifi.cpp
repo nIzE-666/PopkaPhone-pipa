@@ -26,6 +26,9 @@ const char DEV_IFACE[] = "org.freedesktop.NetworkManager.Device";
 const char WIFI_IFACE[] = "org.freedesktop.NetworkManager.Device.Wireless";
 const char AP_IFACE[] = "org.freedesktop.NetworkManager.AccessPoint";
 const char PROPS[] = "org.freedesktop.DBus.Properties";
+const char OBJECT_MANAGER[] = "org.freedesktop.DBus.ObjectManager";
+const char OBJECT_MANAGER_PATH[] = "/org/freedesktop";
+constexpr uint kWifiDeviceType = 2;   // NM_DEVICE_TYPE_WIFI
 
 // состояния устройства NetworkManager (NMDeviceState)
 enum : uint { DevUnmanaged = 10, DevPrepare = 40, DevActivated = 100, DevFailed = 120 };
@@ -72,47 +75,88 @@ Wifi::Wifi(QObject *parent)
 
 void Wifi::start()
 {
+    watchDevice({}, {});
     callAsync(NM, NM_PATH, PROPS, "Get", {NM, "WirelessEnabled"}, [this](const QDBusMessage &r) {
         if (r.type() != QDBusMessage::ReplyMessage)
             return;
         m_radio = plain(r.arguments().value(0)).toBool();
         updateState();
     });
-    callAsync(NM, NM_PATH, NM, "GetDeviceByIpIface", {"wlan0"}, [this](const QDBusMessage &r) {
-        if (r.type() != QDBusMessage::ReplyMessage) {   // ещё нет (загрузка) или пропал — ждём DeviceAdded
-            qCInfo(lcWifi, "в NetworkManager пока нет wlan0");
-            m_devState = 0;
-            updateState();
+    findDevice();
+    loadKnown();
+}
+
+void Wifi::findDevice()
+{
+    const auto discovery = ++m_discovery;
+    callAsync(NM, OBJECT_MANAGER_PATH, OBJECT_MANAGER, "GetManagedObjects", {}, [this, discovery](const QDBusMessage &r) {
+        if (discovery != m_discovery)
             return;
-        }
-        const QString dev = plain(r.arguments().value(0)).toString();
-        if (dev != m_dev) {
-            if (!m_dev.isEmpty()) {   // NetworkManager перезапустился: у устройства новый путь
-                bus().disconnect(NM, m_dev, PROPS, "PropertiesChanged", this,
-                                 SLOT(onDeviceProps(QString,QVariantMap,QStringList)));
-                bus().disconnect(NM, m_dev, DEV_IFACE, "StateChanged", this, SLOT(onDeviceState(uint,uint,uint)));
+        QString dev, iface;
+        int priority = 0;
+        if (r.type() == QDBusMessage::ReplyMessage) {
+            const auto objects = plainMap(r.arguments().value(0));
+            for (auto it = objects.cbegin(); it != objects.cend(); ++it) {
+                const auto props = it.value().toMap().value(DEV_IFACE).toMap();
+                const QString name = props.value("Interface").toString();
+                if (props.value("DeviceType").toUInt() != kWifiDeviceType || !props.value("Managed").toBool()
+                    || name.isEmpty() || name == "wlan1" || name.startsWith("p2p"))
+                    continue;
+                const bool connected = props.value("State").toUInt() == DevActivated;
+                const int rank = 1 + (connected ? 2 : 0) + (name == "wlan0" ? 1 : 0);
+                if (rank > priority) {
+                    priority = rank;
+                    dev = it.key();
+                    iface = name;
+                }
             }
-            m_dev = dev;
+        }
+        watchDevice(dev, iface);
+    });
+}
+
+void Wifi::watchDevice(const QString &dev, const QString &iface)
+{
+    if (dev != m_dev || iface != m_iface) {
+        if (!m_dev.isEmpty()) {
+            bus().disconnect(NM, m_dev, PROPS, "PropertiesChanged", this,
+                             SLOT(onDeviceProps(QString,QVariantMap,QStringList)));
+            bus().disconnect(NM, m_dev, DEV_IFACE, "StateChanged", this, SLOT(onDeviceState(uint,uint,uint)));
+        }
+        watchAp({});
+        m_aps.clear();
+        m_devState = 0;
+        if (!m_pendingSsid.isEmpty())
+            fail(m_pendingSsid, "error");
+        m_dev = dev;
+        m_iface = iface;
+        set("Awake", false);
+        if (!m_dev.isEmpty()) {
             bus().connect(NM, m_dev, PROPS, "PropertiesChanged", this,
                           SLOT(onDeviceProps(QString,QVariantMap,QStringList)));
             bus().connect(NM, m_dev, DEV_IFACE, "StateChanged", this, SLOT(onDeviceState(uint,uint,uint)));
+            qCInfo(lcWifi, "устройство Wi-Fi: %s", qPrintable(m_iface));
         }
+        updateState();
+    }
+    if (!m_dev.isEmpty()) {
         loadDevice();
         loadNetworks();
-    });
-    loadKnown();
+    }
 }
 
 void Wifi::loadDevice()
 {
-    callAsync(NM, m_dev, PROPS, "Get", {DEV_IFACE, "State"}, [this](const QDBusMessage &r) {
-        if (r.type() != QDBusMessage::ReplyMessage)
+    callAsync(NM, m_dev, PROPS, "Get", {DEV_IFACE, "State"}, [this, dev = m_dev](const QDBusMessage &r) {
+        if (dev != m_dev || r.type() != QDBusMessage::ReplyMessage)
             return;
         m_devState = plain(r.arguments().value(0)).toUInt();
         updateState();
+        if (m_devState == DevActivated && !m_holders.isEmpty() && !awake())
+            applyPowerSave();
     });
-    callAsync(NM, m_dev, PROPS, "Get", {WIFI_IFACE, "ActiveAccessPoint"}, [this](const QDBusMessage &r) {
-        if (r.type() == QDBusMessage::ReplyMessage)
+    callAsync(NM, m_dev, PROPS, "Get", {WIFI_IFACE, "ActiveAccessPoint"}, [this, dev = m_dev](const QDBusMessage &r) {
+        if (dev == m_dev && r.type() == QDBusMessage::ReplyMessage)
             watchAp(plain(r.arguments().value(0)).toString());
     });
 }
@@ -149,14 +193,14 @@ void Wifi::loadKnown()
     });
 }
 
-// точки доступа wlan0 со свойствами — одним вызовом ObjectManager (их вокруг бывает под сотню)
+// Точки доступа выбранного интерфейса — одним вызовом ObjectManager.
 void Wifi::loadNetworks()
 {
     if (m_dev.isEmpty())
         return;
-    callAsync(NM, "/org/freedesktop", "org.freedesktop.DBus.ObjectManager", "GetManagedObjects", {},
-              [this](const QDBusMessage &r) {
-                  if (r.type() != QDBusMessage::ReplyMessage)
+    callAsync(NM, OBJECT_MANAGER_PATH, OBJECT_MANAGER, "GetManagedObjects", {},
+              [this, watched = m_dev](const QDBusMessage &r) {
+                  if (watched != m_dev || r.type() != QDBusMessage::ReplyMessage)
                       return;
                   const QVariantMap objects = plain(r.arguments().value(0)).toMap();
                   const QVariantMap dev = objects.value(m_dev).toMap().value(WIFI_IFACE).toMap();
@@ -246,14 +290,18 @@ void Wifi::updateState()
 
 void Wifi::onManagerProps(const QString &, const QVariantMap &changed, const QStringList &)
 {
-    if (!changed.contains("WirelessEnabled"))
-        return;
-    m_radio = plain(changed.value("WirelessEnabled")).toBool();
-    updateState();
+    if (changed.contains("WirelessEnabled")) {
+        m_radio = plain(changed.value("WirelessEnabled")).toBool();
+        updateState();
+    }
+    if (changed.contains("PrimaryConnection") || (changed.contains("WirelessEnabled") && m_radio))
+        findDevice();
 }
 
 void Wifi::onDeviceProps(const QString &, const QVariantMap &changed, const QStringList &)
 {
+    if (changed.contains("Managed") || changed.contains("Interface"))
+        findDevice();
     if (changed.contains("ActiveAccessPoint"))
         watchAp(plain(changed.value("ActiveAccessPoint")).toString());
     if ((changed.contains("LastScan") || changed.contains("AccessPoints")) && listWanted())
@@ -299,7 +347,7 @@ void Wifi::onSettingsChanged()
 
 void Wifi::onDevicesChanged()
 {
-    start();
+    findDevice();
 }
 
 void Wifi::fail(const QString ssid, const QString &reason)
@@ -406,6 +454,8 @@ void Wifi::HoldAwake(bool on)
 // телефона до роутера со сбережением — в среднем 18,5 мс (до 52), без него — 4 мс (до 9).
 void Wifi::applyPowerSave()
 {
+    if (m_iface.isEmpty())
+        return;
     const bool awake = !m_holders.isEmpty();
     auto *p = new QProcess(this);
     connect(p, &QProcess::finished, this, [p, awake](int code) {
@@ -413,7 +463,11 @@ void Wifi::applyPowerSave()
             qCWarning(lcWifi, "iw power_save %s: %s", awake ? "off" : "on", p->readAllStandardError().trimmed().constData());
         p->deleteLater();
     });
-    p->start(QStringLiteral("/usr/sbin/iw"), {"dev", "wlan0", "set", "power_save", awake ? "off" : "on"});
+    connect(p, &QProcess::errorOccurred, p, [p](QProcess::ProcessError error) {
+        if (error == QProcess::FailedToStart)
+            p->deleteLater();
+    });
+    p->start(QStringLiteral("/usr/sbin/iw"), {"dev", m_iface, "set", "power_save", awake ? "off" : "on"});
     if (awake != prop("Awake").toBool())
         qCInfo(lcWifi, "радио без сна: %s", awake ? "да" : "нет");
     set("Awake", awake);

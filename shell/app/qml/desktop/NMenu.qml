@@ -1,5 +1,5 @@
 // Меню под буквой N — как system_popover_draw в bcdesk: «01 NAOMIOS» с четырьмя кнопками (закрыть принудительно,
-// настройки, перезагрузить, закрыть сессию) и «02 APP» — плитки программ: GAME, WEB, FILES, ANDROID, TERMINAL, CLAUDE (плиток
+// настройки, перезагрузить, закрыть сессию) и «02 APP» — плитки GAME, WEB, FILES, ANDROID, TERMINAL, CLAUDE, TELEGRAM (плиток
 // TORRENT и POPKATV НаомиОС здесь нет — убраны по просьбе пользователя 21 ноября 2026). Черта снизу плитки — окна
 // открыты, вполсилы — свёрнуты (как app_tile). WEB — браузер стола (docs/WEB.md), FILES — «Файлы», шестерёнка — «Настройки» стола, «перезагрузить» телефон — как в НаомиОС, со второго нажатия (первое красит
 // кнопку красным и ждёт 4 с, SYS_CONFIRM_MS), и «закрыть сессию» — выйти из дока, как плиткой «трансляция» в шторке
@@ -27,6 +27,12 @@ Item {
     signal webClicked()
     property real claudeOpen: 0
     signal claudeClicked()
+    property real telegramOpen: 0
+    property string telegramError: ""
+    signal telegramClicked()
+    property real deepseekOpen: 0
+    property string deepseekError: ""
+    signal deepseekClicked()
     // игры: [{path, name, system, label}] (naomiGames.games); gameRunning — файл идущей игры, gameOpen — её окно: 1 на
     // виду, 0,5 свёрнуто или ещё запускается
     property var games: []
@@ -43,6 +49,12 @@ Item {
     property string androidState: "off"
     property bool androidShown: false   // модуль «03 ANDROID» открыт плиткой
     signal androidActivated(string pkg)
+    property var linuxApps: []          // установленные Linux .desktop программы
+    property bool linuxShown: false     // модуль «03 LINUX» открыт кнопкой в шапке «02 APP»
+    property string linuxQuery: ""
+    signal linuxAppActivated(var app)
+    signal linuxAppsRefreshed()
+    signal bootAndroidRequested()
     signal systemAction(string action)   // "reboot" — уже подтверждено вторым нажатием; "leave" — закрыть сессию;
                                          // "settings" — «Настройки»
     property string armed: ""            // кнопка, ждущая второго нажатия
@@ -57,11 +69,14 @@ Item {
         armed = ""
         forceOpen = false
         forceSelected = []
+        linuxQuery = ""
     }
     Timer { id: armTimer; interval: 4000; onTriggered: menu.armed = "" }
     width: DeskStyle.sysW
     height: sys.height + DeskStyle.gamesGap + (forceOpen ? forceModule.height : apps.height
-            + (androidShown ? DeskStyle.gamesGap + androidModule.height : gamesShown ? DeskStyle.gamesGap + gamesModule.height : 0))
+            + (androidShown ? DeskStyle.gamesGap + androidModule.height
+             : gamesShown ? DeskStyle.gamesGap + gamesModule.height
+             : linuxShown ? DeskStyle.gamesGap + linuxModule.height : 0))
     visible: opacity > 0
     opacity: open ? 1 : 0
     scale: open ? 1 : 0.96
@@ -132,7 +147,7 @@ Item {
     DeskModule {
         id: sys
         width: menu.width
-        height: DeskStyle.padY + menu.icon + DeskStyle.padY
+        height: 2 * DeskStyle.padY + menu.icon + (bootAndroid.visible ? 8 + bootAndroid.height : 0)
         readonly property real iconsW: 4 * menu.icon + 3 * DeskStyle.sysIconGap
         Plate {
             x: DeskStyle.padX
@@ -155,7 +170,18 @@ Item {
             }
             IconButton { glyph: "gear"; action: "settings"; once: true }
             IconButton { glyph: "reboot"; action: "reboot" }
-            IconButton { glyph: "logout"; action: "leave"; once: true }
+            IconButton { glyph: DeskStyle.tablet ? "lock" : "logout"; action: DeskStyle.tablet ? "sleep" : "leave"; once: true }
+        }
+        NButton {
+            id: bootAndroid
+            x: DeskStyle.padX
+            y: DeskStyle.padY + menu.icon + 8
+            width: menu.innerW
+            visible: DeskStyle.tablet && naomiSystemTools.androidAvailable
+            centered: true
+            text: "Перезагрузить в One UI"
+            disabled: naomiSystemTools.busy
+            onClicked: menu.bootAndroidRequested()
         }
     }
 
@@ -163,10 +189,11 @@ Item {
     readonly property var tiles: [
         { label: "GAME", glyph: "gamepad", game: true }, { label: "WEB", glyph: "globe", web: true },
         { label: "FILES", glyph: "folder", files: true }, { label: "ANDROID", glyph: "android", android: true },
-        { label: "TERMINAL", glyph: "term", term: true }, { label: "CLAUDE", glyph: "claude", claude: true }]
-    readonly property int perRow: 5   // APP_TILES_PER_ROW
+        { label: "TERMINAL", glyph: "term", term: true }, { label: "CLAUDE", glyph: "claude", claude: true },
+        { label: "TELEGRAM", glyph: "telegram", telegram: true },
+        { label: "DEEPSEEK", glyph: "deepseek", deepseek: true }]
+    readonly property int perRow: 4   // APP_TILES_PER_ROW
     readonly property int tileS: Math.floor((innerW - (perRow - 1) * DeskStyle.tileGap) / perRow)
-    readonly property int tileRows: Math.ceil(tiles.length / perRow)
     // черта под ANDROID: окно Android на виду — 1, только свёрнутые или запускается — 0,5
     readonly property real androidLit: {
         const v = Object.values(androidOpen)
@@ -177,14 +204,33 @@ Item {
         visible: !menu.forceOpen
         y: sys.height + DeskStyle.gamesGap
         width: menu.width
-        height: DeskStyle.padY + DeskStyle.plateH + 12 + menu.tileRows * (menu.tileS + 6)
-                + (menu.tileRows - 1) * DeskStyle.tileGap + DeskStyle.padY
+        height: tilesGrid.y + tilesGrid.height + (appError.visible ? appError.height + 8 : 0) + DeskStyle.padY
         Plate {
             x: DeskStyle.padX; y: DeskStyle.padY
             width: menu.innerW
             num: "02"; title: "APP"; note: String(menu.tiles.length)
+            reserve: DeskStyle.tablet ? 84 : 0
+        }
+        NButton {
+            visible: DeskStyle.tablet
+            x: DeskStyle.padX + menu.innerW - width
+            y: DeskStyle.padY - 4
+            width: 78; height: DeskStyle.plateH + 8
+            text: "LINUX"
+            tone: menu.linuxShown ? "on" : "off"
+            fontSize: 11
+            centered: true
+            onClicked: {
+                menu.linuxShown = !menu.linuxShown
+                if (menu.linuxShown) {
+                    menu.androidShown = false
+                    menu.gamesShown = false
+                    menu.linuxAppsRefreshed()
+                }
+            }
         }
         Grid {
+            id: tilesGrid
             x: DeskStyle.padX
             y: DeskStyle.padY + DeskStyle.plateH + 12
             columns: menu.perRow
@@ -198,7 +244,8 @@ Item {
                     readonly property real dy: tileTap.pressed ? 1 : 0
                     readonly property real open: modelData.files ? menu.filesOpen : modelData.android ? menu.androidLit
                                                  : modelData.term ? menu.termOpen : modelData.web ? menu.webOpen
-                                                 : modelData.game ? menu.gameOpen : modelData.claude ? menu.claudeOpen : 0
+                                                 : modelData.game ? menu.gameOpen : modelData.claude ? menu.claudeOpen
+                                                 : modelData.telegram ? menu.telegramOpen : menu.deepseekOpen
                     // плитка горит, пока открыт её модуль «03»
                     readonly property bool lit: !!modelData.android && menu.androidShown || !!modelData.game && menu.gamesShown
                     Rectangle {
@@ -250,19 +297,37 @@ Item {
                             else if (tile.modelData.android) {
                                 menu.androidShown = !menu.androidShown
                                 menu.gamesShown = false
+                                menu.linuxShown = false
                             } else if (tile.modelData.game) {
                                 menu.gamesShown = !menu.gamesShown
                                 menu.androidShown = false
+                                menu.linuxShown = false
                             } else if (tile.modelData.term)
                                 menu.termClicked()
                             else if (tile.modelData.web)
                                 menu.webClicked()
                             else if (tile.modelData.claude)
                                 menu.claudeClicked()
+                            else if (tile.modelData.telegram)
+                                menu.telegramClicked()
+                            else if (tile.modelData.deepseek)
+                                menu.deepseekClicked()
                         }
                     }
                 }
             }
+        }
+        Text {
+            id: appError
+            x: DeskStyle.padX
+            y: tilesGrid.y + tilesGrid.height + 8
+            width: menu.innerW
+            visible: text.length > 0
+            text: menu.deepseekError || menu.telegramError
+            wrapMode: Text.WordWrap
+            font.family: DeskStyle.sans
+            font.pixelSize: DeskStyle.barText
+            color: DeskStyle.bad
         }
     }
 
@@ -496,6 +561,102 @@ Item {
             gear: true
             onActivated: (row) => menu.gameActivated(row)
             onGearClicked: (row) => menu.gamePad(row)
+        }
+    }
+    // ---------- 03 LINUX (все установленные Linux .desktop программы) ----------
+    readonly property var filteredLinuxApps: {
+        const q = linuxQuery.trim().toLowerCase()
+        if (!q)
+            return linuxApps
+        return linuxApps.filter(a => String(a.name || "").toLowerCase().includes(q)
+                                  || String(a.id || "").toLowerCase().includes(q))
+    }
+    DeskModule {
+        id: linuxModule
+        y: androidModule.y
+        width: menu.width
+        readonly property real searchH: 32
+        readonly property real listH: menu.filteredLinuxApps.length
+                                      ? Math.min(menu.filteredLinuxApps.length * menu.rowH - 4, Math.max(3 * menu.rowH - 4, menu.maxListH - searchH - 8))
+                                      : 30
+        height: DeskStyle.padY + menu.icon + 10 + searchH + 8 + listH + DeskStyle.padY
+        visible: opacity > 0 && !menu.forceOpen
+        opacity: menu.linuxShown ? 1 : 0
+        scale: menu.linuxShown ? 1 : 0.96
+        transformOrigin: Item.Top
+        Behavior on opacity { NumberAnimation { duration: menu.linuxShown ? 180 : 140; easing.type: Easing.OutCubic } }
+        Behavior on scale { NumberAnimation { duration: menu.linuxShown ? 180 : 140; easing.type: Easing.OutCubic } }
+        enabled: menu.linuxShown && !menu.forceOpen
+
+        Plate {
+            x: DeskStyle.padX
+            y: DeskStyle.padY + (menu.icon - DeskStyle.plateH) / 2
+            width: menu.innerW
+            num: "03"; title: "LINUX"
+            note: menu.filteredLinuxApps.length ? String(menu.filteredLinuxApps.length) : ""
+            reserve: menu.icon
+        }
+        IconButton {
+            x: DeskStyle.padX + menu.innerW - width
+            y: DeskStyle.padY
+            glyph: "reboot"
+            onActivated: menu.linuxAppsRefreshed()
+        }
+        Rectangle {
+            id: linuxSearchBox
+            x: DeskStyle.padX
+            y: DeskStyle.padY + menu.icon + 10
+            width: menu.innerW
+            height: linuxModule.searchH
+            radius: 3
+            color: DeskStyle.surface
+            border.width: 1
+            border.color: linuxSearch.activeFocus ? DeskStyle.amberA(0.55) : DeskStyle.amberA(DeskStyle.line)
+            TextInput {
+                id: linuxSearch
+                anchors.fill: parent
+                anchors.leftMargin: 10
+                anchors.rightMargin: 10
+                verticalAlignment: TextInput.AlignVCenter
+                text: menu.linuxQuery
+                onTextChanged: menu.linuxQuery = text
+                font.family: DeskStyle.sans
+                font.pixelSize: 13
+                color: DeskStyle.text
+                selectionColor: DeskStyle.amberA(0.35)
+                selectedTextColor: DeskStyle.text
+                clip: true
+                cursorDelegate: Rectangle { width: 1; color: DeskStyle.amber }
+                Text {
+                    visible: !linuxSearch.text
+                    anchors.verticalCenter: parent.verticalCenter
+                    text: "Поиск программ Linux..."
+                    font: linuxSearch.font
+                    color: DeskStyle.dim
+                }
+            }
+        }
+        Text {
+            visible: menu.filteredLinuxApps.length === 0
+            x: DeskStyle.padX
+            y: linuxSearchBox.y + linuxSearchBox.height + 10
+            width: menu.innerW
+            wrapMode: Text.WordWrap
+            text: menu.linuxApps.length === 0 ? "программ пока не найдено" : "ничего не найдено"
+            font.family: DeskStyle.mono
+            font.pixelSize: 12
+            color: DeskStyle.muted
+        }
+        RowList {
+            x: DeskStyle.padX
+            y: linuxSearchBox.y + linuxSearchBox.height + 8
+            width: menu.innerW
+            height: linuxModule.listH
+            rows: menu.filteredLinuxApps
+            keyName: "id"
+            open: ({})
+            launching: ({})
+            onActivated: (row) => menu.linuxAppActivated(row)
         }
     }
     // ---------- 02 FORCE QUIT (docs/DESKTOP.md, «Закрыть принудительно») ----------

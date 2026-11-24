@@ -1,13 +1,13 @@
 // НаомиФон Mirror — страница окна (docs/STREAM.md, «Окно на Mac»; рабочий стол — docs/DESKTOP.md):
 //  • что смотреть — рабочий стол (по умолчанию: второй экран телефона, 16:9, мышь как мышь) или экран телефона
-//    (мышь как палец); ⌘1 / ⌘2 (меню «Вид»), выбор помнится;
-//  • связь — `ssh -W 127.0.0.1:8478` на телефон ключом разработчика (private/ssh), сразу два пути — по кабелю и по
-//    Wi-Fi, видео по одному; кабель вставили или вынули — переход без шва (keepRoute, «Пути» ниже);
+//    (мышь как палец); меню «Вид», выбор помнится;
+//  • связь — SSH ключом разработчика (private/ssh) или локальный TCP через adb forward; два пути одного сеанса
+//    позволяют переключаться между кабелем и Wi-Fi (keepRoute, «Пути» ниже);
 //    служба трансляции слушает только у себя, открытого порта у телефона нет;
-//  • видео — H.264 Annex B, аппаратный декодер (WebCodecs → VideoToolbox на Mac), кадр — на холст в обновление
+//  • видео — H.264 или HEVC Annex B через WebCodecs, кадр — на холст в обновление
 //    экрана, каждый в своё (после провала связи — догоняет, не больше чем на 3 кадра);
 //  • ввод — мышь (на экране телефона — как палец), прокрутка трекпадом — колесо, клавиатура — текст и клавиши;
-//    у экрана телефона Esc — «назад», ⌘↑ — «домой», ⌘↓ — шторка; ⌘V — вставить текст с Mac, ⌘I — цифры.
+//    у экрана телефона Esc — «назад»; сочетания Windows/Linux — в меню «Справка».
 //  • NAOMI_MIRROR_VIA=wifi — по Wi-Fi, даже когда есть кабель;
 //  • экраны (docs/SCREENS.md): окно — один из экранов стола («mac»). Стол на него не выведен или выключен (Switch 0)
 //    — заставка без дока: обои стола и часы, как у приставки, один тихий путь (пинг раз в 30 с), ввод не идёт; щелчок
@@ -22,14 +22,20 @@ const net = require('net');
 const os = require('os');
 const path = require('path');
 const { ipcRenderer } = require('electron');
+const { connectionOptions, sshArguments } = require('./connection');
+const { message, input, readMessages } = require('./protocol');
+const { annexBCodec, decoderConfig, isHevc, windowsCodec } = require('./video');
+const { CTRL, ALT, SHIFT, QT_KEY, MODIFIER_KEYS, shortcut, remoteKey } = require('./keyboard');
+const IS_WINDOWS = process.platform === 'win32';
+const IS_MAC = process.platform === 'darwin';
+const PLATFORM_NAME = IS_WINDOWS ? 'Windows' : IS_MAC ? 'Mac' : 'Linux';
 
-// репозиторий (ключ SSH, адрес Wi-Fi): у собранного приложения — из home.json (его пишет build.sh), из репозитория — папка выше
-const ROOT = (() => {
+// Репозиторий с ключом SSH и адресом Wi-Fi: из launcher, home.json у Mac или папки выше для исходников.
+const ROOT = process.env.NAOMI_MIRROR_ROOT || (() => {
   try { return JSON.parse(fs.readFileSync(path.join(__dirname, 'home.json'), 'utf8')).root; } catch { return path.resolve(__dirname, '..'); }
 })();
-const SSH_DIR = path.join(ROOT, 'private', 'ssh');
+const CONNECTION = connectionOptions(process.env, process.platform);
 const CABLE = '10.77.0.1';
-const PORT = 8478;
 const T = { HELLO: 1, VIDEO: 2, PONG: 3, ROUTE: 4, SWITCH: 9, PING: 10, TOUCH: 11, SCROLL: 12, KEY: 13, KEYFRAME: 14,
   NAV: 15, VIEWER: 16, MODE: 17, POINTER: 18, JOIN: 19, USE: 20, INPUT: 21, DESKSIZE: 22, WANT: 23, AWAY: 27,
   REVEAL: 28, AWAYSHOWN: 29, WAKE: 30, SCREEN: 32, CURSOR: 34, SCREENS: 38, SHOW: 39, CURSORAT: 40, WALLPAPER: 41 };
@@ -64,6 +70,7 @@ function setMode(m) {
   send(T.MODE, Buffer.from([m === 'desktop' ? 1 : 0]));
 }
 ipcRenderer.on('mode', (_e, m) => setMode(m));
+ipcRenderer.on('toggle-hud', () => document.body.classList.toggle('hud'));
 
 // Форма стола — под окно (docs/DESKTOP.md, «Форма стола»): ширина стола та же (1280 точек, кадр 1920), высота — по
 // окну, от 16:9 до 4:3, кратная 4. Окно поменяли (тянут край, полный экран) — через 250 мс после последнего
@@ -189,6 +196,7 @@ splash(true, 0, 0);
 // ---------- связь ----------
 
 function cableUp() {
+  if (CONNECTION.usbPort) return Promise.resolve(true);
   return new Promise((done) => {
     const s = net.connect({ host: CABLE, port: 22, timeout: 700 });
     s.on('connect', () => { s.destroy(); done(true); });
@@ -210,44 +218,76 @@ function cableUp() {
 // По чему идёт на самом деле, говорит телефон (Route: интерфейс, на который пришло подключение, — по его ядру), — это и в
 // заголовке окна, и значком на панели стола.
 const TOKEN = crypto.randomBytes(8);     // билет сеанса: у окна свой
-const ONLY_WIFI = process.env.NAOMI_MIRROR_VIA === 'wifi';   // только по Wi-Fi (кабель тоже подключён)
-const paths = new Map();                 // 'кабель' | 'wi-fi' → подключение (процесс ssh)
+const paths = new Map();                 // 'кабель' | 'wi-fi' → подключение (TCP или процесс ssh)
+const failures = new Map();
 let active = null;                       // путь видео и ввода
 const retryAt = { 'кабель': 0, 'wi-fi': 0 };
 let probing = false;
 let off = false;                         // телефон сказал: трансляция выключена (Switch 0) — ждём на одном тихом пути
+let wantedCodec = IS_WINDOWS ? 'h264' : 'hevc';
 
 function wifiHost() {
-  try { return JSON.parse(fs.readFileSync(path.join(ROOT, 'private', 'device.json'), 'utf8')).wifi_ip; } catch { return null; }
+  if (CONNECTION.via === 'usb') return null;
+  if (CONNECTION.host) return CONNECTION.host;
+  try {
+    const text = fs.readFileSync(path.join(ROOT, 'private', 'device.json'), 'utf8').replace(/^\uFEFF/, '');
+    const host = JSON.parse(text).wifi_ip;
+    return typeof host === 'string' ? host : null;
+  } catch { return null; }
 }
 
-function cableLink() {   // у Mac есть адрес сети кабеля: кабель вставлен, телефон раздал адрес
+function cableLink() {
+  if (CONNECTION.usbPort) return true;   // порт ADB уже выделен launcher
+  if (!CONNECTION.cableNetwork) return false;
+  // Адрес интерфейса кабельной сети выдал телефон.
   return Object.values(os.networkInterfaces()).flat().some((a) => a && a.family === 'IPv4' && a.address.startsWith('10.77.0.'));
 }
 
 function open(way, use) {
   const host = way === 'кабель' ? CABLE : wifiHost();
   if (!host) return;
-  const quiet = off;   // тихий путь: SSH проверяет связь раз в 30 с, а не раз в 2 с — Wi-Fi телефона не будится зря
-  const me = spawn('ssh', [
-    '-i', path.join(SSH_DIR, 'naomiphone_ed25519'),
-    '-o', 'IdentitiesOnly=yes', '-o', 'BatchMode=yes', '-o', 'ConnectTimeout=4',
-    '-o', `ServerAliveInterval=${quiet ? PARKED_PING_MS / 1000 : 2}`, '-o', 'ServerAliveCountMax=3',
-    '-o', `UserKnownHostsFile=${path.join(SSH_DIR, 'known_hosts')}`, '-o', 'HostKeyAlias=naomiphone',
-    '-W', `127.0.0.1:${PORT}`, `phablet@${host}`,
-  ]);
-  Object.assign(me, { way, inbuf: Buffer.alloc(0), lastData: 0, ready: false, route: 0, rtt: 0, quiet, opened: Date.now() });
+  const quiet = off;
+  const direct = way === 'кабель' && CONNECTION.usbPort;
+  const peer = direct ? net.createConnection({ host: '127.0.0.1', port: direct })
+    : spawn('ssh', sshArguments(ROOT, host, CONNECTION.port, quiet ? PARKED_PING_MS / 1000 : 2, process.platform),
+      { windowsHide: true });
+  if (direct) peer.setNoDelay(true);
+  const me = {
+    direct, way, quiet, writer: direct ? peer : peer.stdin, close: () => direct ? peer.destroy() : peer.kill(),
+    inbuf: Buffer.alloc(0), lastData: 0, ready: false, route: 0, rtt: 0, opened: Date.now(),
+  };
   paths.set(way, me);
-  me.stdin.on('error', () => {});   // путь оборвался — пишем в закрытую трубу: не страшно, он закроется
-  me.stdout.on('data', (d) => {
+  const error = (text) => {
+    const detail = (direct ? 'ADB: ' : 'SSH: ') + text.trim();
+    console.warn(detail);
+    if (IS_WINDOWS && !me.ready) failures.set(way, detail);
+  };
+  peer.on('error', (err) => error(err.message));
+  if (!direct) {
+    peer.stdin.on('error', () => {});   // путь оборвался, пока писали в трубу
+    peer.stderr.on('data', (d) => error(d.toString()));
+  }
+  const reader = direct ? peer : peer.stdout;
+  reader.on('data', (d) => {
+    if (paths.get(way) !== me) return;
     me.lastData = Date.now();
     me.ready = true;
-    onData(me, d);
+    failures.delete(way);
+    try {
+      const buffer = me.inbuf.length ? Buffer.concat([me.inbuf, d]) : d;
+      me.inbuf = readMessages(buffer, (type, body) => {
+        if (paths.get(way) === me) handle(me, type, body);
+      });
+    } catch (err) {
+      console.warn('Трансляция:', err.message);
+      me.close();
+    }
   });
-  me.stderr.on('data', (d) => console.warn(`ssh (${way}):`, d.toString().trim()));
-  me.on('exit', () => {
-    if (paths.get(way) === me) paths.delete(way);
-    if (!me.dropped) retryAt[way] = Date.now() + 1500;   // закрыли сами (Switch) — заново сразу
+  peer.on('close', () => {
+    if (paths.get(way) !== me) return;
+    paths.delete(way);
+    if (direct && !me.ready && !failures.has(way)) failures.set(way, 'ADB: служба трансляции не отвечает');
+    retryAt[way] = Date.now() + 1500;
     if (active === me) {
       active = null;
       showVia();
@@ -260,27 +300,28 @@ function open(way, use) {
   sendOn(me, T.SCREENS, screensJson());   // кто мы и какой у нас экран — вторым словом каждого пути, и тихого
   if (use && !quiet) {
     setActive(me);
-    // HEVC, как у приставки: стол один на всех, кодер у телефона один (docs/SCREENS.md); частота — экрана Mac
-    send(T.WANT, Buffer.from(JSON.stringify({ codec: 'hevc', fps: screenHz(), lock: true })));
+    wantVideo();
     syncDesk(true);   // форма стола — раньше выбора стола: телефон пришлёт один Hello уже нужного размера
     send(T.MODE, Buffer.from([mode === 'desktop' ? 1 : 0]));
   }
   pingOn(me);
 }
 
-// Экран этого окна для «Экранов» телефона (Screens): id — один на этот Mac, размер — окна в пикселях
-const SCREEN_ID = os.platform() === 'darwin' ? 'mac' : 'linux';
+// Экран этого окна для «Экранов» телефона (Screens), размер — окна в пикселях.
+const SCREEN_ID = IS_WINDOWS ? 'win' : IS_MAC ? 'mac' : 'linux';
 function screensJson() {
   return Buffer.from(JSON.stringify({
     viewer: SCREEN_ID,
     wall: wallHash,
-    screens: [{ id: SCREEN_ID, name: os.platform() === 'darwin' ? 'Mac' : 'Linux', kind: 'window',
+    screens: [{ id: SCREEN_ID, name: PLATFORM_NAME, kind: 'window',
       w: Math.round(innerWidth * devicePixelRatio), h: Math.round(innerHeight * devicePixelRatio) }],
   }));
 }
 // частота стола, когда главный экран — это окно: частота экрана Mac, но не больше 60 (стол и кодер настроены под 60)
 const SCREEN_HZ = Math.min(60, Math.max(30, Math.round(ipcRenderer.sendSync('screen-hz'))));
-const screenHz = () => SCREEN_HZ;
+function wantVideo() {
+  send(T.WANT, Buffer.from(JSON.stringify({ codec: wantedCodec, fps: SCREEN_HZ, lock: true })));
+}
 
 function setActive(me) {
   active = me;
@@ -298,6 +339,7 @@ function use(me) {
 // по чему идёт: со слов телефона (Route), пока он не сказал — как подключались
 function currentVia() {
   if (!active) return '';
+  if (active.direct) return 'кабель';
   return active.route === 1 ? 'кабель' : active.route === 2 ? 'wi-fi' : active.way;
 }
 let shownVia = null;
@@ -315,7 +357,7 @@ function setOff(on) {
   if (on === off && on) return;
   off = on;
   console.log(on ? 'телефон: стол сюда не выведен — заставка, жду тихо' : 'телефон: стол выведен сюда — подключаюсь');
-  paths.forEach((p) => { p.dropped = true; p.kill(); });
+  paths.forEach((p) => p.close());
   paths.clear();
   active = null;
   retryAt['кабель'] = retryAt['wi-fi'] = 0;
@@ -344,18 +386,21 @@ function wake() {
 
 async function keepRoute() {
   const now = Date.now();
-  const link = !ONLY_WIFI && cableLink();
-  const cable = paths.get('кабель'), wifi = paths.get('wi-fi');
+  const link = cableLink();
+  const cable = paths.get('кабель');
   if (cable && !link) {   // кабель вынут — путь мёртв, ждать SSH (≈ 6 с) незачем
     paths.delete('кабель');
-    cable.kill();
+    cable.close();
     if (active === cable) active = null;
   }
+  if (cable?.direct && !off && now - Math.max(cable.lastData, cable.opened) > (cable.ready ? 5000 : 1800))
+    cable.close();
   if (off) {   // один тихий путь — по кабелю, если он есть, иначе по Wi-Fi; молчит дольше 95 с — мёртв
     lostSince = 0;
-    paths.forEach((p) => { if (now - Math.max(p.lastData, p.opened) > PARKED_SILENT_MS) p.kill(); });
+    paths.forEach((p) => { if (now - Math.max(p.lastData, p.opened) > (p.direct && !p.ready ? 1800 : PARKED_SILENT_MS)) p.close(); });
     if (paths.size || probing) return;
-    const way = link ? 'кабель' : 'wi-fi';
+    const useCable = link && (!CONNECTION.usbPort || now >= retryAt['кабель'] || !wifiHost());
+    const way = useCable ? 'кабель' : 'wi-fi';
     if (now >= retryAt[way] && (way === 'кабель' || wifiHost())) open(way, false);
     return;
   }
@@ -366,7 +411,8 @@ async function keepRoute() {
   else if (!lostSince) lostSince = now;
   else if (now - lostSince > 1500 && !wallOn) splash(true, 500, 180);
   if (!paths.size) {
-    status(shown ? 'нет связи — переподключаюсь' : 'подключаюсь…');
+    const failure = failures.get('wi-fi') || failures.get('кабель');
+    status(failure || (shown ? 'нет связи — переподключаюсь' : 'подключаюсь…'));
     if (probing) return;
     if (link && now >= retryAt['кабель']) {
       probing = true;
@@ -376,10 +422,8 @@ async function keepRoute() {
       if (ok) return open('кабель', true);
       retryAt['кабель'] = Date.now() + 1500;
     }
-    if (!paths.size && now >= retryAt['wi-fi']) {
-      if (wifiHost()) open('wi-fi', true);
-      else status('телефона не видно');
-    }
+    if (now >= retryAt['wi-fi'] && wifiHost()) open('wi-fi', true);
+    else if (!link && !wifiHost()) status(IS_WINDOWS ? 'Для подключения запустите tools/mirror_win.py' : 'телефона не видно');
     return;
   }
   // запасные — когда первый заговорил (сеанс начат)
@@ -391,7 +435,7 @@ async function keepRoute() {
       if (ok && cableLink() && !paths.has('кабель')) open('кабель', false);
       else retryAt['кабель'] = Date.now() + 1500;
     }
-    if (!ONLY_WIFI && !paths.has('wi-fi') && now >= retryAt['wi-fi'] && wifiHost()) open('wi-fi', false);
+    if (CONNECTION.via !== 'wifi' && !paths.has('wi-fi') && now >= retryAt['wi-fi'] && wifiHost()) open('wi-fi', false);
   }
   // видео — по кабелю, когда он живой; иначе — по живому
   const c = paths.get('кабель'), w = paths.get('wi-fi');
@@ -402,35 +446,26 @@ async function keepRoute() {
     if (any) use(any);
   }
 }
-setInterval(keepRoute, 100);
-setInterval(() => paths.forEach((p) => { if (!p.quiet) pingOn(p); }), 100);
-setInterval(() => paths.forEach((p) => { if (p.quiet) pingOn(p); }), PARKED_PING_MS);
+window.addEventListener('beforeunload', () => paths.forEach((p) => p.close()));
 
 // AWDL Mac (AirDrop, Handoff, AirPlay, Universal Control) раз в 0,52 с уводит Wi-Fi Mac с канала на ~90 мс —
 // по Wi-Fi это провалы связи (docs/STREAM.md, «Плавность по Wi-Fi»); в цифрах (⌘I) — подсказка
 let awdl = false;
 function checkAwdl() {
   awdl = false;
-  if (os.platform() !== 'darwin' || via !== 'wi-fi') return;
+  if (!IS_MAC || via !== 'wi-fi') return;
   execFile('/sbin/ifconfig', ['awdl0'], (err, out) => { awdl = !err && /status: active/.test(out); });
 }
 
 function sendOn(proc, type, body = Buffer.alloc(0)) {
-  if (!proc || !proc.stdin.writable) return;
-  const head = Buffer.alloc(5);
-  head.writeUInt32LE(1 + body.length, 0);
-  head.writeUInt8(type, 4);
-  proc.stdin.write(Buffer.concat([head, body]));
+  if (proc?.writer.writable) proc.writer.write(message(type, body));
 }
 
 // ввод — по всем путям, что сказали хоть слово, с номером: телефон выполнит один раз, по какому бы ни пришёл
 let inputSeq = 0;
 function send(type, body = Buffer.alloc(0)) {
   if (off) return;   // трансляция выключена: телефон ввода не ждёт
-  const inner = Buffer.alloc(5 + body.length);
-  inner.writeUInt32LE(++inputSeq, 0);
-  inner[4] = type;
-  body.copy(inner, 5);
+  const inner = input(++inputSeq, type, body);
   paths.forEach((p) => { if (p.ready || p === active) sendOn(p, T.INPUT, inner); });
 }
 
@@ -438,18 +473,6 @@ function pingOn(proc) {
   const b = Buffer.alloc(8);
   b.writeBigUInt64LE(BigInt(nowUs()));
   sendOn(proc, T.PING, b);
-}
-
-function onData(me, chunk) {
-  me.inbuf = me.inbuf.length ? Buffer.concat([me.inbuf, chunk]) : chunk;
-  let at = 0;
-  while (me.inbuf.length - at >= 5) {
-    const len = me.inbuf.readUInt32LE(at);
-    if (me.inbuf.length - at - 4 < len) break;
-    handle(me, me.inbuf[at + 4], me.inbuf.subarray(at + 5, at + 4 + len));
-    at += 4 + len;
-  }
-  me.inbuf = me.inbuf.subarray(at);
 }
 
 let fitted = null;
@@ -507,9 +530,11 @@ function handle(me, type, body) {
     status('');
     entering = true;   // первый кадр потока — на экран: заставка (если она есть) тает, телефону — Reveal
     // окно — под то, что смотрим, только когда это сменилось (не при переходе кабель ↔ Wi-Fi: размер — как был)
-    if ((hello.mode || 'phone') !== fitted) {
-      fitted = hello.mode || 'phone';
-      ipcRenderer.send('fit', fitted);
+    const mode = hello.mode || 'phone';
+    const fit = IS_WINDOWS && mode === 'phone' ? [mode, hello.width, hello.height].join(':') : mode;
+    if (fit !== fitted) {
+      fitted = fit;
+      ipcRenderer.send('fit', mode, { width: hello.width, height: hello.height });
     } else if (hello.mode === 'desktop') {
       syncDesk(false);   // стол не той формы, что окно (телефон перезапускали) — поправить
     }
@@ -528,42 +553,51 @@ let lastCapture = 0;
 
 // ---------- видео ----------
 
-const hex = (v) => v.toString(16).toUpperCase().padStart(2, '0');
-// строка кодека для WebCodecs — из самого SPS (профиль, ограничения, уровень)
-function codecOf(data) {
-  for (let i = 0; i + 6 < data.length; i++) {
-    if (data[i] === 0 && data[i + 1] === 0 && data[i + 2] === 1 && (data[i + 3] & 0x1f) === 7)
-      return `avc1.${hex(data[i + 4])}${hex(data[i + 5])}${hex(data[i + 6])}`;
-  }
-  return (hello && hello.codec) || 'avc1.42E033';
-}
+let decoderRetry = null, decodeFailed = false;
 
 function resetDecoder() {
   if (decoder && decoder.state !== 'closed') decoder.close();
   decoder = null;
+  clearTimeout(decoderRetry);
+  decoderRetry = null;
+  decodeFailed = false;
   waitingKey = true;
   pending.clear();
   while (queue.length) queue.shift().frame.close();
   lastVideo = null;
 }
 
-function configure(data) {
-  decoder = new VideoDecoder({
+function decoderError(error, codec) {
+  console.error('декодер:', error?.name || '', error?.message || error);
+  resetDecoder();
+  if (!IS_WINDOWS) {
+    send(T.KEYFRAME);
+    return;
+  }
+  decodeFailed = true;
+  if (isHevc(codec) && wantedCodec === 'hevc') {
+    wantedCodec = 'h264';
+    status('HEVC недоступен. Запрашиваю H.264…');
+    wantVideo();
+  } else {
+    status(isHevc(codec) ? 'HEVC недоступен. Кодек общий для всех экранов'
+      : 'Ошибка декодирования H.264. Запрашиваю опорный кадр…');
+  }
+  decoderRetry = setTimeout(() => {
+    decoderRetry = null;
+    send(T.KEYFRAME);
+  }, 750);
+}
+
+function configure(codec) {
+  const current = new VideoDecoder({
     output: onFrame,
-    error: (e) => {
-      console.error('декодер:', e);
-      resetDecoder();
-      send(T.KEYFRAME);
-    },
+    error: (error) => { if (decoder === current) decoderError(error, codec); },
   });
-  decoder.configure({
-    // HEVC — Annex B без описания: Main, уровень 5.2 (кодер телефона, docs/STREAM.md); H.264 — строка из SPS
-    codec: hello && /^hvc1|^hev1/.test(hello.codec || '') ? 'hev1.1.6.L156.B0' : codecOf(data),
-    optimizeForLatency: true,
-    hardwareAcceleration: 'prefer-hardware',
-    // цвет — как пакует телефон (shell/stream/nv12_pack.cpp): BT.709, узкий диапазон; передача — sRGB
-    colorSpace: { primaries: 'bt709', transfer: 'iec61966-2-1', matrix: 'bt709', fullRange: false },
-  });
+  decoder = current;
+  // H.264 на Windows может декодироваться программно, если профиль недоступен с ускорением.
+  const acceleration = IS_WINDOWS && !isHevc(codec) ? 'no-preference' : 'prefer-hardware';
+  decoder.configure(decoderConfig(codec, IS_WINDOWS ? hello : null, acceleration));
 }
 
 // NAOMI_MIRROR_DUMP=файл.h264 — принятый поток (первые копии кадров), как есть: разобрать ffmpeg (качество кадров)
@@ -577,19 +611,21 @@ function onVideo(body) {
   const key = body[16] & 1;
   const data = body.subarray(17);
   stats.bytes += data.length;
-  if (waitingKey) {
-    if (!key) return;
-    if (!decoder) configure(data);
+  if (waitingKey && (!key || decoderRetry)) return;
+  try {
+    if (!decoder) configure(annexBCodec(data, hello?.codec));
     waitingKey = false;
+    const recv = nowUs();
+    // провал связи: кадр пришёл позже, чем был снят после прошлого (в движении — кадры идут подряд)
+    if (lastVideo && capture - lastVideo.capture < 50000)
+      stats.stall = Math.max(stats.stall, (recv - lastVideo.recv - (capture - lastVideo.capture)) / 1000);
+    lastVideo = { capture, recv };
+    pending.set(capture, { recv, encoded });
+    if (pending.size > 30) pending.delete(pending.keys().next().value);
+    decoder.decode(new EncodedVideoChunk({ type: key ? 'key' : 'delta', timestamp: capture, data }));
+  } catch (error) {
+    decoderError(error, annexBCodec(data, hello?.codec));
   }
-  const recv = nowUs();
-  // провал связи: кадр пришёл позже, чем был снят после прошлого (в движении — кадры идут подряд)
-  if (lastVideo && capture - lastVideo.capture < 50000)
-    stats.stall = Math.max(stats.stall, (recv - lastVideo.recv - (capture - lastVideo.capture)) / 1000);
-  lastVideo = { capture, recv };
-  pending.set(capture, { recv, encoded });
-  if (pending.size > 30) pending.delete(pending.keys().next().value);
-  decoder.decode(new EncodedVideoChunk({ type: key ? 'key' : 'delta', timestamp: capture, data }));
 }
 
 // NAOMI_MIRROR_TRACE=файл.csv — времена каждого кадра (для замеров плавности): захват и сжатие — часы телефона,
@@ -657,8 +693,9 @@ function draw(item) {
   awayMarks.delete(frame.timestamp);
   frame.close();
   stats.frames++;
-  if (!shown) {
+  if (!shown || decodeFailed) {
     shown = true;
+    decodeFailed = false;
     status('');
   }
   if (entering) {
@@ -702,13 +739,13 @@ setInterval(() => {
   // кадров по каждому пути за секунду: пришло / из них первыми
   const per = [...paths.values()].map((p) => `${p.way} ${p.videos || 0}/${p.first || 0}`).join(', ');
   paths.forEach((p) => { p.videos = 0; p.first = 0; });
-  const line = `${desktop() ? 'стол' : 'телефон'} ${hello ? `${hello.width}×${hello.height}` : '…'} · ${via}`
+  const line = `${desktop() ? 'стол' : IS_WINDOWS ? 'планшет' : 'телефон'} ${hello ? `${hello.width}×${hello.height}` : '…'} · ${via}`
     + `${spare ? ` (запасной: ${spare.way}, пинг ${f1(spare.rtt / 1000)} мс)` : ''} · ${Math.round(stats.frames / sec)} к/с · `
     + `${f1(stats.bytes * 8 / sec / 1e6)} Мбит/с\n`
     + `телефон (кадр → сжат) ${f1(median(s.phone))} мс\n`
     + `связь ${f1(median(s.net))} мс · провал до ${f1(stats.stall)} мс · пинг ${f1(stats.rtt / 1000)} мс\n`
     + `распаковка ${f1(median(s.decode))} мс\n`
-    + `итого до Mac ${f1(median(s.total))} мс · не показано ${stats.skipped}\n`
+    + `итого до ${PLATFORM_NAME} ${f1(median(s.total))} мс · не показано ${stats.skipped}\n`
     + `кадры по путям (пришло / первыми): ${per}`
     + (awdl ? '\nAWDL Mac включён: провалы связи ~90 мс раз в 0,5 с' : '');
   hudEl.textContent = line;
@@ -747,55 +784,61 @@ function touch(phase, x, y) {
 
 // Рабочий стол — мышь как мышь: каждое движение (и без кнопок — наведение), кнопки (1 — левая, 2 — правая,
 // 4 — средняя). Экран телефона — мышь как палец: нажал — коснулся, повёл, отпустил.
-let buttons = 0;   // нажатые кнопки — по pointerdown / pointerup (у DOM: 0 — левая, 1 — средняя, 2 — правая)
-const bit = (button) => ({ 0: 1, 1: 4, 2: 2 })[button] || 0;
+let buttons = 0;
 function pointer(e) {
   const [x, y] = norm(e);
   const b = Buffer.alloc(9);
   // и Shift, Ctrl (⌘), Alt — выделение с Ctrl и Shift в «Файлах»
-  b[0] = buttons | (e.shiftKey ? 16 : 0) | (e.ctrlKey || e.metaKey ? 32 : 0) | (e.altKey ? 64 : 0);
+  b[0] = buttons | (e.shiftKey ? 16 : 0) | (e.ctrlKey || (IS_MAC && e.metaKey) ? 32 : 0) | (e.altKey ? 64 : 0);
   b.writeFloatLE(x, 1);
   b.writeFloatLE(y, 5);
   send(T.POINTER, b);
 }
 
-let pressed = false;
+let touchId = null;
 canvas.addEventListener('contextmenu', (e) => e.preventDefault());
 canvas.addEventListener('pointerdown', (e) => {
+  if (e.pointerType === 'touch' && !e.isPrimary) return;
   if (wake()) return;   // заставка: щелчок — «стол сюда»
-  canvas.setPointerCapture(e.pointerId);
   if (desktop()) {
-    buttons |= bit(e.button);
+    canvas.setPointerCapture(e.pointerId);
+    buttons = e.buttons & 7;
     pointer(e);
     return;
   }
-  if (e.button !== 0) return;
-  pressed = true;
+  if (e.button !== 0 || touchId !== null) return;
+  canvas.setPointerCapture(e.pointerId);
+  touchId = e.pointerId;
   touch(0, ...norm(e));
 });
 canvas.addEventListener('pointermove', (e) => {
+  if (e.pointerType === 'touch' && !e.isPrimary) return;
   guestEl.style.display = 'none';   // своя мышь в окне — чужая стрелка не нужна
   // все точки между кадрами Chromium — скорость пальца и ход мыши точнее
   const all = e.getCoalescedEvents ? e.getCoalescedEvents() : [e];
   if (desktop()) {
+    buttons = e.buttons & 7;
     for (const p of all.length ? all : [e]) pointer(p);
     return;
   }
-  if (!pressed) return;
+  if (touchId !== e.pointerId) return;
   for (const p of all.length ? all : [e]) touch(1, ...norm(p));
 });
 const lift = (phase) => (e) => {
+  if (e.pointerType === 'touch' && !e.isPrimary) return;
   if (desktop()) {
-    buttons &= phase === 3 ? 0 : ~bit(e.button);
+    if (phase === 3 && !buttons) return;
+    buttons = phase === 3 ? 0 : e.buttons & 7;
     pointer(e);
     return;
   }
-  if (!pressed) return;
-  pressed = false;
+  if (touchId !== e.pointerId) return;
+  touchId = null;
   touch(phase, ...norm(e));
 };
 canvas.addEventListener('pointerup', lift(2));
 canvas.addEventListener('pointercancel', lift(3));
+canvas.addEventListener('lostpointercapture', lift(3));
 
 // прокрутка: сдвиг в долях экрана, как у колеса в браузере (вниз — положительный); конец — после паузы
 let wheelEnd = null, wheelAt = [0.5, 0.5];
@@ -812,9 +855,9 @@ canvas.addEventListener('wheel', (e) => {
   e.preventDefault();
   if (e.ctrlKey) return;   // щипок трекпада — не прокрутка
   const r = frameRect();
-  const k = e.deltaMode === 1 ? 16 : 1;
+  const units = e.deltaMode === 1 ? [16, 16] : e.deltaMode === 2 ? [r.width, r.height] : [1, 1];
   if (!wheelEnd) wheelAt = norm(e);
-  scroll(wheelAt[0], wheelAt[1], (e.deltaX * k) / r.width, (e.deltaY * k) / r.height, 1);
+  scroll(wheelAt[0], wheelAt[1], (e.deltaX * units[0]) / r.width, (e.deltaY * units[1]) / r.height, 1);
   clearTimeout(wheelEnd);
   wheelEnd = setTimeout(() => {
     wheelEnd = null;
@@ -823,13 +866,7 @@ canvas.addEventListener('wheel', (e) => {
 }, { passive: false });
 
 // клавиши Qt (Qt::Key) и модификаторы; ⌘ на Mac — Ctrl у Qt (выделить всё, отменить)
-const QT_KEY = {
-  Tab: 0x01000001, Backspace: 0x01000003, Enter: 0x01000004, Delete: 0x01000007, Home: 0x01000010,
-  End: 0x01000011, ArrowLeft: 0x01000012, ArrowUp: 0x01000013, ArrowRight: 0x01000014, ArrowDown: 0x01000015,
-  PageUp: 0x01000016, PageDown: 0x01000017, F2: 0x01000031, F5: 0x01000034, F10: 0x01000039, ContextMenu: 0x01000055,
-};
 const KEY_V = 0x56, KEY_H = 0x48, ALT_BACKSPACE = [0x01000003, 0x08000000];
-const SHIFT = 0x02000000, CTRL = 0x04000000, ALT = 0x08000000;
 const mods = (e) => (e.shiftKey ? SHIFT : 0) | (e.ctrlKey || e.metaKey ? CTRL : 0) | (e.altKey ? ALT : 0);
 
 function key(down, qtKey, modifiers, text) {
@@ -843,6 +880,16 @@ function key(down, qtKey, modifiers, text) {
 }
 const nav = (action) => send(T.NAV, Buffer.from([action]));
 
+function paste() {
+  // Стол получает Ctrl+V вместе с текстом, экран устройства — сам текст.
+  const pasteMode = mode;
+  ipcRenderer.invoke('clipboard-text').then((text) => {
+    if (mode !== pasteMode || off) return;
+    if (desktop()) { key(true, KEY_V, CTRL, text); key(false, KEY_V, CTRL, text); }
+    else if (text) { key(true, 0, 0, text); key(false, 0, 0, text); }
+  }).catch((error) => console.warn('Буфер обмена:', error));
+}
+
 const DESK_CMD = {
   Backspace: () => ALT_BACKSPACE,
   ArrowUp: () => [QT_KEY.ArrowUp, ALT],
@@ -853,7 +900,7 @@ const DESK_CMD = {
 };
 
 const shotKeys = new Set();   // ⇧⌥3 / ⇧⌥4, ушедшие столу: их отпускание — тоже клавишей
-function onKey(e, down) {
+function onMacKey(e, down) {
   if (off) {   // заставка: клавиша (не ⌘-сочетание окна и не один модификатор) — «стол сюда»
     if (down && !e.metaKey && !['Shift', 'Control', 'Alt', 'Meta', 'CapsLock'].includes(e.key)) {
       e.preventDefault();
@@ -887,14 +934,8 @@ function onKey(e, down) {
     else if (e.code === 'ArrowUp' && !desktop()) nav(NAV.HOME);
     else if (e.code === 'ArrowDown' && !desktop()) nav(NAV.SHADE);
     else if (e.code === 'KeyI') document.body.classList.toggle('hud');
-    else if (e.code === 'KeyV') {
-      // телефону — текст буфера Mac; столу — Ctrl+V с этим текстом: поле его напечатает, «Файлы» вставят файлы.
-      // Буфер — у главного процесса (в странице Electron модуля clipboard нет)
-      ipcRenderer.invoke('clipboard-text').then((text) => {
-        if (desktop()) { key(true, KEY_V, CTRL, text); key(false, KEY_V, CTRL, text); }
-        else if (text) { key(true, 0, 0, text); key(false, 0, 0, text); }
-      });
-    } else if (desktop() && DESK_CMD[e.code]) {
+    else if (e.code === 'KeyV') paste();
+    else if (desktop() && DESK_CMD[e.code]) {
       // сочетания Finder — клавишами «Файлов» НаомиОС: ⌘⌫ в корзину, ⌘↑ наверх, ⌘↓ открыть, ⌘[ ⌘] назад/вперёд,
       // ⌘⇧. скрытые
       const [k, m] = DESK_CMD[e.code](e);
@@ -908,15 +949,66 @@ function onKey(e, down) {
   }
   e.preventDefault();
   if (e.key === 'Escape') {   // телефону — «назад», столу — клавиша Esc
-    if (desktop()) key(down, 0x01000000, mods(e), '');
+    if (desktop()) key(down, QT_KEY.Escape, mods(e), '');
     else if (down) nav(NAV.BACK);
     return;
   }
   if (QT_KEY[e.key]) key(down, QT_KEY[e.key], mods(e), e.key === 'Enter' ? '\r' : e.key === 'Tab' ? '\t' : '');
   else if (e.key.length === 1 || [...e.key].length === 1) key(down, 0, 0, e.key);   // буква с раскладки Mac
 }
+
+const heldKeys = new Map();   // отпускание с тем же кодом и модификаторами, с которыми нажали
+const windowActions = {
+  desktop: () => setMode('desktop'),
+  phone: () => setMode('phone'),
+  hud: () => document.body.classList.toggle('hud'),
+};
+const deviceActions = { paste, back: () => nav(NAV.BACK), home: () => nav(NAV.HOME), shade: () => nav(NAV.SHADE) };
+function onDesktopKey(e, down) {
+  if (heldKeys.has(e.code)) {
+    e.preventDefault();
+    const args = heldKeys.get(e.code);
+    if (!down) heldKeys.delete(e.code);
+    if (args) key(down, ...args);
+    return;
+  }
+  if (!down || e.metaKey || e.isComposing) return;
+  const action = shortcut(e, desktop());
+  const run = windowActions[action] || (!off && deviceActions[action]);
+  if (run) {
+    e.preventDefault();
+    heldKeys.set(e.code, null);
+    run();
+    return;
+  }
+  if (off) {
+    if (!MODIFIER_KEYS.has(e.key)) {
+      e.preventDefault();
+      wake();
+    }
+    return;
+  }
+  const args = remoteKey(e);
+  if (!args) return;
+  e.preventDefault();
+  heldKeys.set(e.code, args);
+  key(true, ...args);
+}
+
+window.addEventListener('blur', () => {
+  heldKeys.forEach((args) => { if (args) key(false, ...args); });
+  heldKeys.clear();
+});
+const onKey = IS_MAC ? onMacKey : onDesktopKey;
 window.addEventListener('keydown', (e) => onKey(e, true));
 window.addEventListener('keyup', (e) => onKey(e, false));
 
 if (process.env.NAOMI_MIRROR_HUD) document.body.classList.add('hud');
-keepRoute();
+async function start() {
+  if (IS_WINDOWS) wantedCodec = await windowsCodec(globalThis.VideoDecoder);
+  keepRoute();
+  setInterval(keepRoute, 100);
+  setInterval(() => paths.forEach((p) => { if (!p.quiet) pingOn(p); }), 100);
+  setInterval(() => paths.forEach((p) => { if (p.quiet) pingOn(p); }), PARKED_PING_MS);
+}
+start();

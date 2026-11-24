@@ -263,9 +263,24 @@ bool spawn(Session &s, int cols, int rows)
         }
         // окружение программ оболочки телефона (служба могла запуститься и от неё) — не им
         for (const char *v : {"QT_QPA_PLATFORM", "QT_QPA_EGLFS_INTEGRATION", "QT_QPA_EGLFS_HIDECURSOR", "QT_PLUGIN_PATH",
-                              "EGL_PLATFORM", "NAOMI_FRAMESTATS", "WAYLAND_DISPLAY", "QT_SCALE_FACTOR", "INVOCATION_ID",
+                              "EGL_PLATFORM", "NAOMI_FRAMESTATS", "QT_SCALE_FACTOR", "INVOCATION_ID",
                               "JOURNAL_STREAM", "SYSTEMD_EXEC_PID", "MANAGERPID"})
             unsetenv(v);
+        // Пробрасываем сокет Wayland рабочего стола, если он поднят: из терминала можно запускать GUI-приложения
+        // Linux (mpv, firefox, code, gimp) и wl-copy/wl-paste прямо окнами на столе PopkaPhone.
+        const char *rtDir = getenv("XDG_RUNTIME_DIR");
+        const std::string wlSock = std::string(rtDir && *rtDir ? rtDir : "/run/user/32011") + "/wayland-naomi";
+        if (access(wlSock.c_str(), F_OK) == 0) {
+            setenv("WAYLAND_DISPLAY", "wayland-naomi", 1);
+            setenv("QT_QPA_PLATFORM", "wayland", 1);
+            setenv("EGL_PLATFORM", "wayland", 1);
+            setenv("GDK_BACKEND", "wayland,x11", 1);
+            setenv("SDL_VIDEODRIVER", "wayland,x11", 1);
+            setenv("MOZ_ENABLE_WAYLAND", "1", 1);
+            setenv("ELECTRON_OZONE_PLATFORM_HINT", "wayland", 1);
+        } else {
+            unsetenv("WAYLAND_DISPLAY");
+        }
         setenv("TERM", "xterm-256color", 1);
         setenv("COLORTERM", "truecolor", 1);
         setenv("TERM_PROGRAM", "naomi-term", 1);

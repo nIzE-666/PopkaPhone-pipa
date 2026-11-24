@@ -34,6 +34,7 @@ class Audio : public BusObject, protected QDBusContext
 
 public:
     explicit Audio(QObject *parent = nullptr);
+    ~Audio() override;
 
     int volume() const { return prop("Volume").toInt(); }
     bool muted() const { return prop("Muted").toBool(); }
