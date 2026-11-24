@@ -7,6 +7,7 @@ import java.lang.reflect.InvocationTargetException;
 public final class BootControl {
     private static final String V1_0 = "android.hardware.boot@1.0::IBootControl";
     private static final String V1_1 = "android.hardware.boot@1.1::IBootControl";
+    private static final String V1_2 = "android.hardware.boot@1.2::IBootControl";
 
     private BootControl() {}
 
@@ -15,7 +16,7 @@ public final class BootControl {
             execute(args);
         } catch (ReflectiveOperationException | RuntimeException error) {
             Throwable detail = error instanceof InvocationTargetException ? error.getCause() : error;
-            System.err.println("Boot Control 1.1: " + detail);
+            System.err.println("Boot Control: " + detail);
             System.exit(1);
         }
     }
@@ -36,21 +37,34 @@ public final class BootControl {
         }
 
         Class<?> hwBinder = Class.forName("android.os.HwBinder");
-        Object service = hwBinder.getMethod("getService", String.class, String.class, boolean.class)
-                .invoke(null, V1_1, "default", false);
+        java.lang.reflect.Method getService = hwBinder.getMethod("getService", String.class, String.class, boolean.class);
+        String halVersion = V1_2;
+        Object service = null;
+        try {
+            service = getService.invoke(null, V1_2, "default", false);
+        } catch (InvocationTargetException ignored) {
+            service = null;
+        }
+        if (service == null) {
+            halVersion = V1_1;
+            service = getService.invoke(null, V1_1, "default", false);
+        }
         if (service == null) {
             throw new IllegalStateException("HAL service is unavailable");
         }
         if (method == 0) {
-            System.out.println("HAL Version: " + V1_1);
+            System.out.println("HAL Version: " + halVersion);
             return;
+        }
+        if (method == 11 && !V1_2.equals(halVersion)) {
+            throw new UnsupportedOperationException("getActiveBootSlot requires Boot Control 1.2");
         }
 
         Class<?> parcel = Class.forName("android.os.HwParcel");
         Object request = parcel.getConstructor().newInstance();
         Object reply = parcel.getConstructor().newInstance();
         try {
-            String token = method == 10 ? V1_1 : V1_0;
+            String token = method == 11 ? V1_2 : (method == 10 ? V1_1 : V1_0);
             parcel.getMethod("writeInterfaceToken", String.class).invoke(request, token);
             if (takesSlot) {
                 parcel.getMethod("writeInt32", int.class).invoke(request, 1);
@@ -61,12 +75,20 @@ public final class BootControl {
             switch (method) {
                 case 1:
                 case 2:
+                case 11:
                     System.out.println(parcel.getMethod("readInt32").invoke(reply));
                     break;
                 case 4:
                     Object result = parcel.getMethod("readBuffer", long.class).invoke(reply, 24L);
                     if (!(boolean) result.getClass().getMethod("getBool", long.class).invoke(result, 0L)) {
-                        throw new IllegalStateException("HAL rejected setActiveBootSlot");
+                        String msg = "";
+                        try {
+                            Object raw = result.getClass().getMethod("getString", long.class).invoke(result, 8L);
+                            if (raw instanceof String && !((String) raw).isEmpty()) {
+                                msg = ": " + raw;
+                            }
+                        } catch (ReflectiveOperationException | RuntimeException ignored) {}
+                        throw new IllegalStateException("HAL rejected setActiveBootSlot" + msg);
                     }
                     break;
                 case 6:
@@ -99,6 +121,7 @@ public final class BootControl {
             case "is-slot-bootable": return 6;
             case "get-suffix": return 8;
             case "get-snapshot-merge-status": return 10;
+            case "get-active-boot-slot": return 11;
             default: throw new IllegalArgumentException("unsupported command: " + command);
         }
     }

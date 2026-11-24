@@ -30,17 +30,29 @@ public final class MainActivity extends Activity {
     @Override
     protected void onCreate(Bundle saved) {
         super.onCreate(saved);
+        if (VISIBLE.isEmpty() && phase == Phase.FAILED) {
+            phase = Phase.CONFIRM;
+            failure = "";
+        }
         dialog = new AlertDialog.Builder(this)
                 .setTitle(R.string.title)
                 .setMessage(R.string.confirm)
-                .setNegativeButton(android.R.string.cancel, (ignored, button) -> finish())
+                .setNegativeButton(android.R.string.cancel, (ignored, button) -> cancelAndFinish())
                 .setPositiveButton(R.string.reboot, null)
                 .create();
-        dialog.setOnCancelListener(ignored -> finish());
+        dialog.setOnCancelListener(ignored -> cancelAndFinish());
         dialog.show();
         dialog.getButton(DialogInterface.BUTTON_POSITIVE).setFilterTouchesWhenObscured(true);
         dialog.getButton(DialogInterface.BUTTON_POSITIVE).setOnClickListener(ignored -> startSwitch());
         refreshDialog();
+    }
+
+    private void cancelAndFinish() {
+        if (phase == Phase.FAILED) {
+            phase = Phase.CONFIRM;
+            failure = "";
+        }
+        finish();
     }
 
     @Override

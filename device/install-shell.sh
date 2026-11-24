@@ -57,6 +57,13 @@ install)
             > /etc/systemd/journald.conf.d/90-naomi.conf
         rm -rf /var/log/journal/*
         systemctl restart systemd-journald
+    elif [ "$TARGET" = pipa ]; then
+        # /var/log на pipa лежит на 52 ГБ /userdata: единый лимит 100 МБ сохраняет ранние логи загрузки.
+        mkdir -p /etc/systemd/journald.conf.d
+        rm -f /etc/systemd/journald.conf.d/pipa-size.conf
+        printf '# НаомиФон (pipa): единый лимит журнала на /userdata\n[Journal]\nSystemMaxUse=100M\nRuntimeMaxUse=32M\n' \
+            > /etc/systemd/journald.conf.d/90-naomi.conf
+        systemctl restart systemd-journald || true
     fi
     install_runtime
     mkdir -p "$LIB"
@@ -191,7 +198,7 @@ LimitMEMLOCK=infinity
 # замораживает их ядром (docs/DESKTOP.md, «Выключатель»). Перед остановкой — оттаять: замороженная программа SIGTERM
 # не прочтёт, и остановка (и перезапуск после падения) ждала бы её до SIGKILL
 Delegate=yes
-ExecStop=-/bin/sh -c 'echo 0 > /sys/fs/cgroup/system.slice/naomi-shell.service/desk/cgroup.freeze'
+ExecStop=-/bin/sh -c 'if [ -w /sys/fs/cgroup/system.slice/naomi-shell.service/desk/cgroup.freeze ]; then echo 0 > /sys/fs/cgroup/system.slice/naomi-shell.service/desk/cgroup.freeze; fi'
 Restart=on-failure
 RestartSec=1
 # 75 — оболочка просит перезапуск (новая ширина кадра из «Настроек»): не падение
@@ -203,7 +210,7 @@ WantedBy=graphical.target
 EOF
     if [ "$TARGET" = pipa ]; then
         sed -i '/^OnFailure=naomi-safe.service$/d' "$UNITS/naomi-shell.service"
-        sed -i '/^\[Unit\]$/a After=repowerd.service naomi-pipa-awake.service\nConflicts=repowerd.service\nWants=naomi-pipa-awake.service' \
+        sed -i '/^\[Unit\]$/a After=naomi-pipa-awake.service\nConflicts=repowerd.service\nWants=naomi-pipa-awake.service' \
             "$UNITS/naomi-shell.service"
         cat > "$UNITS/naomi-pipa-awake.service" <<'EOF'
 [Unit]
@@ -218,8 +225,26 @@ ExecStartPre=-/bin/sh -c 'if [ -w /sys/power/wake_lock ] && [ -w /sys/power/wake
 ExecStart=/usr/bin/systemd-inhibit --what=sleep:idle:handle-power-key --mode=block --who=NaomiPhone --why "Tablet display session" /usr/bin/sleep infinity
 ExecStopPost=-/bin/sh -c 'if [ -w /sys/power/wake_unlock ]; then echo naomi-pipa > /sys/power/wake_unlock; fi'
 EOF
+        # Чистый сброс буферов userdata.img (loop0) и f2fs /mnt/android-host-data перед ребутом в One UI (_a).
+        mkdir -p /usr/lib/systemd/system-shutdown
+        cat > /usr/lib/systemd/system-shutdown/naomi-pipa-sync <<'EOF'
+#!/bin/sh
+/bin/sync 2>/dev/null || sync 2>/dev/null || true
+mount -o remount,ro /userdata 2>/dev/null || true
+mount -o remount,ro /mnt/android-host-data 2>/dev/null || true
+/bin/sync 2>/dev/null || sync 2>/dev/null || true
+exit 0
+EOF
+        chmod 755 /usr/lib/systemd/system-shutdown/naomi-pipa-sync
+        # Маскируем конфликтующие службы Ubuntu Touch: keep-display-on-during-boot тянет repowerd
+        # и держит graphical.target 300 секунд при выключенном lightdm; dpkg-db-backup падает на RO-корне.
+        systemctl mask repowerd.service keep-display-on-during-boot.service >/dev/null 2>&1 || true
+        systemctl stop motd-news.timer dpkg-db-backup.timer >/dev/null 2>&1 || true
+        systemctl mask motd-news.timer dpkg-db-backup.timer dpkg-db-backup.service >/dev/null 2>&1 || true
         systemctl daemon-reload
-        echo 'pipa: службы установлены. Первый запуск вручную после остановки владельца дисплея.'
+        systemctl enable naomid.service naomi-shell.service >/dev/null 2>&1 || true
+        systemctl restart naomid.service
+        echo "pipa: установлено naomid ($(systemctl is-active naomid)), naomi-shell (автозапуск); repowerd/keep-display-on/dpkg-db-backup выключены"
         exit 0
     fi
 
@@ -267,8 +292,12 @@ uninstall)
     if [ "$(cat "$LIB/device.env" 2>/dev/null || true)" = NAOMI_DEVICE=pipa ]; then
         systemctl disable --now naomi-shell.service naomid.service >/dev/null 2>&1 || true
         systemctl stop naomi-pipa-awake.service >/dev/null 2>&1 || true
-        rm -f "$UNITS/naomi-shell.service" "$UNITS/naomid.service" "$UNITS/naomi-pipa-awake.service" "$BUS_POLICY"
+        rm -f "$UNITS/naomi-shell.service" "$UNITS/naomid.service" "$UNITS/naomi-pipa-awake.service" \
+              "$BUS_POLICY" /usr/lib/systemd/system-shutdown/naomi-pipa-sync \
+              /etc/systemd/journald.conf.d/90-naomi.conf
         rm -rf "$LIB"
+        systemctl unmask repowerd.service keep-display-on-during-boot.service motd-news.timer \
+                         dpkg-db-backup.timer dpkg-db-backup.service >/dev/null 2>&1 || true
         systemctl daemon-reload
         systemctl reload dbus
         exit 0

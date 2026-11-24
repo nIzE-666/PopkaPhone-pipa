@@ -6,10 +6,12 @@ import java.io.InputStream;
 import java.io.InputStreamReader;
 import java.io.OutputStream;
 import java.nio.charset.StandardCharsets;
+import java.util.concurrent.TimeUnit;
 
 final class RootBootRequest {
     private static final String REBOOT_REQUESTED = "UBUNTU_TOUCH_REBOOT_REQUESTED";
     private static final int REPORT_LIMIT = 512;
+    private static final long TIMEOUT_SECONDS = 20L;
 
     static void reboot(InputStream script, String sourceApk) throws IOException, InterruptedException {
         String command = "PATH=/system/bin:/system/xbin:/system_ext/bin:/product/bin:/vendor/bin "
@@ -37,6 +39,7 @@ final class RootBootRequest {
         }
 
         boolean requested = false;
+        boolean timedOut = false;
         StringBuilder report = new StringBuilder();
         try (BufferedReader output =
                 new BufferedReader(new InputStreamReader(shell.getInputStream(), StandardCharsets.UTF_8))) {
@@ -48,8 +51,15 @@ final class RootBootRequest {
                 }
             }
         } finally {
-            // Дожидаемся завершения операции выбора слота даже при закрытии канала вывода.
-            shell.waitFor();
+            // Ограничиваем ожидание, чтобы зависший su/HAL не блокировал диалог навсегда.
+            if (!shell.waitFor(TIMEOUT_SECONDS, TimeUnit.SECONDS)) {
+                timedOut = true;
+                shell.destroyForcibly();
+                shell.waitFor(2, TimeUnit.SECONDS);
+            }
+        }
+        if (timedOut) {
+            throw new IOException("Помощник переключения не ответил за " + TIMEOUT_SECONDS + " с.");
         }
         if (shell.exitValue() == 0 && requested) {
             return;

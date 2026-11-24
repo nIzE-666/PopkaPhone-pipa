@@ -5,6 +5,7 @@
 #include "bus_object.h"
 
 #include <QProcess>
+#include <QTimer>
 
 class System : public BusObject
 {
@@ -23,5 +24,6 @@ private:
     void replyToOneUi(const QString &error);
 
     QProcess m_oneUi;
+    QTimer m_oneUiTimeout;
     QDBusMessage m_oneUiRequest;
 };

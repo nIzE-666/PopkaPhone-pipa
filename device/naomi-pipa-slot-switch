@@ -64,6 +64,12 @@ select_slot() {
     fi
 }
 
+flush_fs() {
+    if command -v sync >/dev/null 2>&1; then
+        sync || true
+    fi
+}
+
 main() {
     [ "$#" = 1 ] || die 'Нужен режим one-ui или ubuntu-touch.'
     [ "$(id -u)" = 0 ] || die 'Для выбора загрузочного слота нужен root-доступ.'
@@ -73,6 +79,7 @@ main() {
             source_index=1 source_suffix=_b source_system='Ubuntu Touch'
             target_index=0 target_suffix=_a target_system='One UI'
             select_slot lxc-attach -n android --clear-env -- /system/bin/bootctl
+            flush_fs
             SYSTEMCTL_SKIP_AUTO_KEXEC=1 SYSTEMCTL_SKIP_AUTO_SOFT_REBOOT=1 systemctl --no-block reboot \
                 || die 'Слот _a с One UI уже выбран. Systemd отклонил запрос перезагрузки.'
             ;;
@@ -93,7 +100,13 @@ main() {
                 return
             fi
             select_slot "$@"
-            reboot || die 'Слот _b с Ubuntu Touch уже выбран. Android отклонил запрос перезагрузки.'
+            flush_fs
+            if command -v svc >/dev/null 2>&1; then
+                svc power reboot || reboot \
+                    || die 'Слот _b с Ubuntu Touch уже выбран. Android отклонил запрос перезагрузки.'
+            else
+                reboot || die 'Слот _b с Ubuntu Touch уже выбран. Android отклонил запрос перезагрузки.'
+            fi
             printf '%s\n' 'UBUNTU_TOUCH_REBOOT_REQUESTED'
             ;;
         *) die 'Нужен режим one-ui или ubuntu-touch.' ;;

@@ -12,11 +12,24 @@ System::System(QObject *parent)
 {
     m_oneUi.setStandardInputFile(QProcess::nullDevice());
     m_oneUi.setStandardOutputFile(QProcess::nullDevice());
+    m_oneUiTimeout.setSingleShot(true);
+    m_oneUiTimeout.setInterval(20000);
+    connect(&m_oneUiTimeout, &QTimer::timeout, this, [this] {
+        if (m_oneUi.state() == QProcess::NotRunning)
+            return;
+        m_oneUi.kill();
+        replyToOneUi(QStringLiteral("Помощник One UI не ответил вовремя (таймаут 20 с)."));
+    });
     connect(&m_oneUi, &QProcess::errorOccurred, this, [this](QProcess::ProcessError error) {
-        if (error == QProcess::FailedToStart)
+        if (error == QProcess::FailedToStart) {
+            m_oneUiTimeout.stop();
             replyToOneUi(QStringLiteral("Не удалось запустить помощник One UI. %1").arg(m_oneUi.errorString()));
+        }
     });
     connect(&m_oneUi, &QProcess::finished, this, [this](int code, QProcess::ExitStatus status) {
+        m_oneUiTimeout.stop();
+        if (m_oneUiRequest.type() == QDBusMessage::InvalidMessage)
+            return;
         if (status == QProcess::NormalExit && code == 0) {
             replyToOneUi({});
             return;
@@ -34,13 +47,15 @@ System::System(QObject *parent)
 void System::Reboot()
 {
     qCInfo(lcSystem, "перезагрузка телефона — просьба с шины");
-    QProcess::startDetached("systemctl", {"reboot"});
+    QProcess::startDetached("env", {"SYSTEMCTL_SKIP_AUTO_KEXEC=1", "SYSTEMCTL_SKIP_AUTO_SOFT_REBOOT=1",
+                                    "systemctl", "reboot"});
 }
 
 void System::PowerOff()
 {
     qCInfo(lcSystem, "выключение телефона — просьба с шины");
-    QProcess::startDetached("systemctl", {"poweroff"});
+    QProcess::startDetached("env", {"SYSTEMCTL_SKIP_AUTO_KEXEC=1", "SYSTEMCTL_SKIP_AUTO_SOFT_REBOOT=1",
+                                    "systemctl", "poweroff"});
 }
 
 void System::RebootOneUi(const QDBusMessage &request)
@@ -55,6 +70,7 @@ void System::RebootOneUi(const QDBusMessage &request)
         return;
     }
     m_oneUiRequest = request;
+    m_oneUiTimeout.start();
     m_oneUi.start(QStringLiteral("/usr/local/lib/naomi/naomi-pipa-slot-switch"), {QStringLiteral("one-ui")});
 }
 

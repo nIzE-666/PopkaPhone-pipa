@@ -92,11 +92,22 @@ QString cleanSerial(const QByteArray &raw)
 QString findWirelessDevice()
 {
     const QDir net(QStringLiteral("/sys/class/net"));
+    QString fallback;
     for (const QString &name : net.entryList(QDir::Dirs | QDir::NoDotAndDotDot)) {
-        if (QFile::exists(net.filePath(name + QStringLiteral("/wireless"))))
+        if (name == QLatin1String("wlan1") || name.startsWith(QLatin1String("p2p"))
+            || name.startsWith(QLatin1String("wifi-aware")))
+            continue;
+        if (!QFile::exists(net.filePath(name + QStringLiteral("/wireless"))))
+            continue;
+        // ARPHRD_ETHER (1) отсеивает служебные P2P/NAN-интерфейсы, отклоняющие iw set power_save (-22).
+        if (readSys(net.filePath(name + QStringLiteral("/type"))) != "1")
+            continue;
+        if (name == QLatin1String("wlan0") || name.startsWith(QLatin1String("wlp")))
             return name;
+        if (fallback.isEmpty())
+            fallback = name;
     }
-    return {};
+    return fallback;
 }
 
 // Энергосбережение Wi-Fi: от батареи — включено (экономит заряд), на кабеле — выключено: с ним точка доступа копит
@@ -110,15 +121,26 @@ void applyWifiPowerSave(bool plugged)
         return;
     QProcess get;
     get.start("iw", {"dev", dev, "get", "power_save"});
-    if (!get.waitForFinished(2000))
+    if (!get.waitForFinished(2000) || get.exitStatus() != QProcess::NormalExit || get.exitCode() != 0)
         return;
     const bool on = get.readAllStandardOutput().contains(": on");
     const bool want = !plugged;
     if (on == want)
         return;
-    if (QProcess::execute("iw", {"dev", dev, "set", "power_save", want ? "on" : "off"}) == 0)
+    QProcess setProc;
+    setProc.start("iw", {"dev", dev, "set", "power_save", want ? "on" : "off"});
+    if (setProc.waitForFinished(2000) && setProc.exitStatus() == QProcess::NormalExit && setProc.exitCode() == 0) {
         qCInfo(lcCharge, "Wi-Fi (%s): энергосбережение %s (%s)", qPrintable(dev), want ? "вкл." : "выкл.",
                plugged ? "на кабеле" : "от батареи");
+    } else {
+        static QString lastWarnKey;
+        const QString err = QString::fromUtf8(setProc.readAllStandardError()).simplified();
+        const QString key = dev + QLatin1Char(':') + (want ? QLatin1String("on") : QLatin1String("off")) + err;
+        if (key != lastWarnKey) {
+            lastWarnKey = key;
+            qCWarning(lcCharge, "Wi-Fi (%s): не удалось переключить power_save (%s)", qPrintable(dev), qPrintable(err));
+        }
+    }
 }
 
 } // namespace
