@@ -1,0 +1,52 @@
+name: Bug Report
+description: Report a bug in PopkaPhone-pipa shell, hardware daemon, camera, dual-boot, mirror, or companion tools
+title: "[Bug]: "
+labels: ["bug"]
+body:
+  - type: dropdown
+    id: component
+    attributes:
+      label: Component
+      options:
+        - naomi-shell / Wayland desktop UI
+        - naomid / SM8250 hardware & power
+        - HWC2 display / refresh rate / rotation
+        - naomi-camera (libhybris camera)
+        - Dual-boot / A/B slot switch
+        - Windows 11 Mirror client
+        - Telegram Control Hub / PC Agent
+        - Build / devroot / tools/pipa.py
+        - Documentation
+    validations:
+      required: true
+  - type: input
+    id: environment
+    attributes:
+      label: Device & OS Version
+      description: Device model, Ubuntu Touch channel/build, and active slot
+      placeholder: "Xiaomi Pad 6 (pipa), Ubuntu Touch 26.04 Halium 13 v0.2.0, slot _b"
+    validations:
+      required: true
+  - type: textarea
+    id: description
+    attributes:
+      label: Describe the bug
+      description: Clear summary of what happened vs. what you expected.
+    validations:
+      required: true
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Steps to reproduce
+      placeholder: |
+        1. Open ...
+        2. Run ...
+        3. Observe ...
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Relevant logs (redacted)
+      description: Output from `journalctl -u naomi-shell -u naomid -n 80 --no-pager` or CLI commands. Remove any personal IPs, MACs, or tokens before pasting.
+      render: shell

@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Installation & Recovery Guide (English)
+    url: https://github.com/nIzE-666/PopkaPhone-pipa/blob/main/docs/PIPA-INSTALL.en.md
+    about: Step-by-step setup, devroot build, camera activation, and Fastboot rollback.
+  - name: Upstream PopkaPhone (Pixel 5)
+    url: https://github.com/PopaSpinka/PopkaPhone
+    about: Original upstream project that PopkaPhone-pipa is forked from.

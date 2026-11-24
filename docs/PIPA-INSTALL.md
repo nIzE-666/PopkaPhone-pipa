@@ -1,5 +1,7 @@
 # Пошаговая установка PopkaPhone Linux на Xiaomi Pad 6 (`pipa`)
 
+[English](PIPA-INSTALL.en.md) · **Русский**
+
 Эта инструкция описывает полный путь установки **Ubuntu Touch 26.04 LTS (Halium 13) + оптимизированного PopkaPhone** на планшет **Xiaomi Pad 6 (`pipa`, SM8250)** второй системой на слоте `_b` с сохранением Android на слоте `_a`.
 
 > ⚠️ **Важно перед началом**

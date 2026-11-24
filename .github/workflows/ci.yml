@@ -1,0 +1,117 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  python-tests:
+    name: Python & C++ Harness Tests (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install Python test dependencies
+        run: python -m pip install --upgrade pip && python -m pip install -r extras/tg-bot/requirements.txt
+
+      - name: Run unittest suite
+        run: python -m unittest discover -s tools/tests -v
+
+  mirror-tests:
+    name: Mirror Node Tests (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Run Electron Mirror unit tests
+        run: node --test mirror/tests/keyboard.test.js mirror/tests/stream.test.js
+
+  scripts-and-hygiene:
+    name: Shell Syntax, Line Endings & Secret Guard
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Verify shell script syntax
+        run: |
+          set -euo pipefail
+          for f in \
+            device/install-shell.sh \
+            device/shell-prepare \
+            device/devroot.sh \
+            device/naomi-camera \
+            device/naomi-pipa-slot-switch \
+            device/naomi-telegram \
+            device/naomi-deepseek \
+            extras/tg-bot/install.sh
+          do
+            head_line="$(head -n 1 "$f")"
+            if echo "$head_line" | grep -q "bash"; then
+              bash -n "$f"
+            else
+              sh -n "$f"
+            fi
+            echo "OK: $f"
+          done
+
+      - name: Verify LF line endings & scan for accidental secrets
+        run: |
+          python3 - <<'EOF'
+          import os, re, sys
+
+          crlf_errors = []
+          secret_errors = []
+          secret_rx = re.compile(
+              r"ghp_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,}|sk-[A-Za-z0-9]{24,}|"
+              r"-----BEGIN [A-Z ]+PRIVATE KEY-----|\b\d{9,11}:[A-Za-z0-9_-]{30,}\b"
+          )
+
+          for root, dirs, files in os.walk("."):
+              dirs[:] = [d for d in dirs if d not in (".git", "node_modules", "__pycache__")]
+              for name in files:
+                  path = os.path.join(root, name)
+                  rel = os.path.relpath(path, ".").replace("\\", "/")
+                  if rel == ".github/workflows/ci.yml":
+                      continue
+                  data = open(path, "rb").read()
+                  if (rel.startswith("device/") or rel.startswith("extras/tg-bot/") or rel.endswith((".sh", ".service"))) and b"\r\n" in data:
+                      crlf_errors.append(rel)
+                  if name.endswith((".png", ".jpg", ".jpeg", ".ico", ".webp")):
+                      continue
+                  text = data.decode("utf-8", errors="ignore")
+                  for idx, line in enumerate(text.splitlines(), 1):
+                      if secret_rx.search(line):
+                          secret_errors.append(f"{rel}:{idx}")
+
+          if crlf_errors:
+              print("CRLF found in Linux files:", crlf_errors)
+              sys.exit(1)
+          if secret_errors:
+              print("Potential secret pattern found:", secret_errors)
+              sys.exit(1)
+          print("Hygiene checks passed: LF endings clean, 0 secret patterns.")
+          EOF

@@ -1,0 +1,24 @@
+name: Feature Request
+description: Propose a new feature or UX improvement for PopkaPhone-pipa
+title: "[Feature]: "
+labels: ["enhancement"]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem or use case
+      description: What workflow or tablet capability would this improve?
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed solution
+      description: How should it work from a user or developer perspective?
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives or additional context
+      description: Links to related Ubuntu Touch / Halium / Qt Wayland projects, mockups, or constraints.

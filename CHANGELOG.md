@@ -1,3 +1,34 @@
+# Changelog
+
+## v0.1.0-pipa — 2026-11-24
+
+First public Xiaomi Pad 6 (`pipa`) release built on top of upstream [PopaSpinka/PopkaPhone](https://github.com/PopaSpinka/PopkaPhone) (`25c1d6b`, MIT) — **181 files changed (+20,811 / −1,063 lines)**.
+
+### Xiaomi Pad 6 (`pipa`) Hardware & Dual-Boot Port
+- **Non-destructive A/B dual-boot:** runs Ubuntu Touch 26.04 LTS (Halium 13) on slot `_b` while keeping stock/custom Android untouched on slot `_a`.
+- **Bidirectional slot switching:** added `device/naomi-pipa-slot-switch` (Boot Control HAL 1.1/1.2 verification) wired into the `N` menu and a companion Android app + Quick Settings tile (`tablet/boot-switch/`).
+- **Display & HWC2 (`shell/display/`, `shell/device_profile.cpp`):** native 11″ `2880×1800` (`1440×900 dp` at DPR 2.0) on-screen desktop via QTI SDM linear `CLIENT` target, dynamic `60/90/120/144 Hz` enumeration, adaptive `60↔120 Hz` refresh hysteresis, 4-way rotation + long-press auto-rotate lock, and sysfs backlight (`4-0011`).
+- **Snapdragon 870 (`SM8250`) tuning (`device/shell-prepare`, `shell/naomid/`):** `schedutil` + input boost, unlocked C-states (`lpm_levels`), L3/LLCC/DDR/NPU devfreq, IRQ affinity, 4 GB `zstd` ZRAM, `read_ahead_kb=128`, PulseAudio 48 kHz (`avoid-resampling=yes`), NetworkManager `wlp1s0`, and hardware 80% battery charge limit (`night_charging`).
+- **On-device build & safety CLI (`tools/pipa.py`, `device/devroot.sh`):** validates device model (`pipa`), Ubuntu Touch 26.04 (`arm64`), and slot `_b` before staging sources or compiling natively on-device.
+
+### Desktop Ergonomics, Native Camera & Pro Settings
+- **Native dual-camera app (`shell/apps/camera/` → `naomi-camera`):** direct `libhybris` `libcamera.so.1` backend using offscreen null-platform EGL Pbuffer (`HYBRIS_EGLPLATFORM=null`) + `cameraservice-trust-stored`; supports rear 13 MP (`4208×3120`) and front 8 MP (`3264×2448`) sensors, zoom, tap-to-focus, flash/torch, MP4 H.264 recording (`ffmpeg`), and headless `--snap` / `--torch` CLI.
+- **Multitasking & tablet UX (`shell/app/qml/desktop/`):** 50/50 split-screen window snapping, Always-on-Top PiP pinning, Clipboard History popover (`06 БУФЕР`, 15 entries) + PC clipboard sync, quick screenshot, `03 LINUX` `.desktop` launcher with search, Waydroid 10-minute idle auto-stop, and Laptop auto-mode (physical keyboard & `card0-DP-1` detection).
+- **Pro Settings (`InterfacePage.qml`, `SystemPage.qml`):** 24-hour / 12-hour clock toggle (24h default), seconds & date format, warm Night Filter overlay (`0–60%`), terminal font/extra-keys mode, live SM8250 CPU governor selector, thermal/ZRAM/disk telemetry, service toggles, timezone/NTP, journal cleanup, plus Mouse and VPN pages.
+- **Terminal & browser upgrades:** touch extra-keys bar with haptics, pinch/touch gestures, `WAYLAND_DISPLAY=wayland-naomi` inheritance, Open-in-Terminal from Files, GPU rasterization and per-tab dark/light toggle in `naomi-web`.
+
+### Windows 11 Mirror & Optional Companion Tools
+- **Windows 11 Mirror (`mirror/`, `tools/mirror_win.py`):** Electron desktop viewer over USB (`adb forward`) and Wi-Fi (`ssh -W`) with WebCodecs H.264/HEVC Annex B decoding, touch/mouse/keyboard/clipboard forwarding, and portable x64 packaging (`mirror/build-win.ps1`).
+- **Optional self-hosted companion stack:** 20-command Telegram Control Hub (`extras/tg-bot/`, `/term`, `/cam`, `/clip`, LAN DLNA server) and zero-dependency Windows LAN PC Agent (`extras/pc-agent/pc_agent.py`, RFC1918 guard + `X-Pipa-Token`).
+
+### Quality, Testing & Open-Source Infrastructure
+- Added **91 Python & C++ harness unit tests** (`tools/tests/`) and **8 Node Mirror tests** (`mirror/tests/`).
+- Added GitHub Actions CI (`.github/workflows/ci.yml`), English & Russian documentation (`README.md`, `README.ru.md`, `docs/PIPA-INSTALL.en.md`), `ROADMAP.md`, `CONTRIBUTING.md`, Issue/PR templates, and verified MIT attribution (`LICENSE`, `THIRD-PARTY.md`).
+
+---
+
+## Upstream History (`PopaSpinka/PopkaPhone` — Pixel 5)
+
 # История НаомиФона
 
 ## Дальше (в работе)

@@ -1,0 +1,26 @@
+name: Device Port Proposal
+description: Discuss porting PopkaPhone-pipa to another Halium 13 / Snapdragon tablet or phone
+title: "[Port]: "
+labels: ["device-port"]
+body:
+  - type: input
+    id: device
+    attributes:
+      label: Device name, codename, and SoC
+      placeholder: "e.g., Xiaomi Pad 5 (nabu), Snapdragon 860 (SM8150)"
+    validations:
+      required: true
+  - type: input
+    id: base_port
+    attributes:
+      label: Existing Ubuntu Touch / Halium port link
+      placeholder: "https://github.com/..."
+    validations:
+      required: true
+  - type: textarea
+    id: hardware_info
+    attributes:
+      label: Known hardware details
+      description: Display resolution & refresh rates, backlight sysfs path, HWC2/Camera HAL status, and A/B partition layout.
+    validations:
+      required: true
