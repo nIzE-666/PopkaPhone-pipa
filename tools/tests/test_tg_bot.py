@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import ast
+import asyncio
 import base64
 import http.client
 import json
@@ -13,7 +14,7 @@ import unittest
 import xml.etree.ElementTree as ET
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 from urllib.parse import urlparse
 
 
@@ -531,65 +532,58 @@ class SamsungDLNAAndMediaServerAsyncTests(unittest.IsolatedAsyncioTestCase):
                 parsed = urlparse(url1)
                 self.assertTrue(parsed.path.startswith(f"/media/{tok1}/"))
 
+                def _req(method: str, path: str, headers: Optional[Dict[str, str]] = None):
+                    conn = http.client.HTTPConnection("127.0.0.1", port, timeout=3)
+                    try:
+                        conn.request(method, path, headers=headers or {})
+                        resp = conn.getresponse()
+                        body = resp.read()
+                        return resp.status, {k.lower(): v for k, v in resp.getheaders()}, body
+                    finally:
+                        conn.close()
+
                 # 1. Full GET
-                conn = http.client.HTTPConnection("127.0.0.1", port, timeout=3)
-                try:
-                    conn.request("GET", parsed.path)
-                    resp = conn.getresponse()
-                    body = resp.read()
-                    self.assertEqual(resp.status, 200)
-                    self.assertEqual(body, payload1)
-                    self.assertEqual(resp.getheader("Accept-Ranges"), "bytes")
-                    self.assertIn("video/mp4", resp.getheader("Content-Type") or "")
+                st, hdrs, body = await asyncio.to_thread(_req, "GET", parsed.path)
+                self.assertEqual(st, 200)
+                self.assertEqual(body, payload1)
+                self.assertEqual(hdrs.get("accept-ranges"), "bytes")
+                self.assertIn("video/mp4", hdrs.get("content-type") or "")
 
-                    # 2. HEAD
-                    conn.request("HEAD", parsed.path)
-                    resp_h = conn.getresponse()
-                    self.assertEqual(resp_h.status, 200)
-                    self.assertEqual(resp_h.read(), b"")
-                    self.assertEqual(int(resp_h.getheader("Content-Length") or "0"), len(payload1))
+                # 2. HEAD
+                st_h, hdrs_h, body_h = await asyncio.to_thread(_req, "HEAD", parsed.path)
+                self.assertEqual(st_h, 200)
+                self.assertEqual(body_h, b"")
+                self.assertEqual(int(hdrs_h.get("content-length") or "0"), len(payload1))
 
-                    # 3. Byte Range (206 Partial Content)
-                    conn.request("GET", parsed.path, headers={"Range": "bytes=4-11"})
-                    resp_r = conn.getresponse()
-                    r_body = resp_r.read()
-                    self.assertEqual(resp_r.status, 206)
-                    self.assertEqual(r_body, payload1[4:12])
-                    self.assertEqual(resp_r.getheader("Content-Range"), f"bytes 4-11/{len(payload1)}")
+                # 3. Byte Range (206 Partial Content)
+                st_r, hdrs_r, r_body = await asyncio.to_thread(_req, "GET", parsed.path, {"Range": "bytes=4-11"})
+                self.assertEqual(st_r, 206)
+                self.assertEqual(r_body, payload1[4:12])
+                self.assertEqual(hdrs_r.get("content-range"), f"bytes 4-11/{len(payload1)}")
 
-                    # 4. Unsatisfiable Range (416)
-                    conn.request("GET", parsed.path, headers={"Range": "bytes=9999-10000"})
-                    resp_416 = conn.getresponse()
-                    resp_416.read()
-                    self.assertEqual(resp_416.status, 416)
+                # 4. Unsatisfiable Range (416)
+                st_416, _, _ = await asyncio.to_thread(_req, "GET", parsed.path, {"Range": "bytes=9999-10000"})
+                self.assertEqual(st_416, 416)
 
-                    # 5. Path traversal rejected (403)
-                    for evil_path in (
-                        f"/media/{tok1}/..%2fetc%2fpasswd",
-                        "/media/../etc/passwd",
-                        f"/media/{tok1}/..%5csecret",
-                    ):
-                        conn.request("GET", evil_path)
-                        resp_bad = conn.getresponse()
-                        resp_bad.read()
-                        self.assertIn(resp_bad.status, (400, 403), f"Expected traversal block for {evil_path}")
+                # 5. Path traversal rejected (403)
+                for evil_path in (
+                    f"/media/{tok1}/..%2fetc%2fpasswd",
+                    "/media/../etc/passwd",
+                    f"/media/{tok1}/..%5csecret",
+                ):
+                    st_bad, _, _ = await asyncio.to_thread(_req, "GET", evil_path)
+                    self.assertIn(st_bad, (400, 403), f"Expected traversal block for {evil_path}")
 
-                    # 6. Unknown token -> 404
-                    conn.request("GET", "/media/deadbeefdeadbeef/nope.mp4")
-                    resp_404 = conn.getresponse()
-                    resp_404.read()
-                    self.assertEqual(resp_404.status, 404)
+                # 6. Unknown token -> 404
+                st_404, _, _ = await asyncio.to_thread(_req, "GET", "/media/deadbeefdeadbeef/nope.mp4")
+                self.assertEqual(st_404, 404)
 
-                    # 7. Max entries cap evicts oldest (tok1 evicted after f2 + f3)
-                    srv.register_file(f2)
-                    srv.register_file(f3)
-                    self.assertEqual(srv.entry_count(), 2)
-                    conn.request("GET", parsed.path)
-                    resp_evicted = conn.getresponse()
-                    resp_evicted.read()
-                    self.assertEqual(resp_evicted.status, 404)
-                finally:
-                    conn.close()
+                # 7. Max entries cap evicts oldest (tok1 evicted after f2 + f3)
+                srv.register_file(f2)
+                srv.register_file(f3)
+                self.assertEqual(srv.entry_count(), 2)
+                st_evicted, _, _ = await asyncio.to_thread(_req, "GET", parsed.path)
+                self.assertEqual(st_evicted, 404)
             finally:
                 await srv.stop()
                 self.assertFalse(srv.is_running)
