@@ -67,6 +67,7 @@ jobs:
             device/naomi-pipa-slot-switch \
             device/naomi-telegram \
             device/naomi-deepseek \
+            device/95-pipa-mode \
             extras/tg-bot/install.sh
           do
             head_line="$(head -n 1 "$f")"
@@ -77,6 +78,8 @@ jobs:
             fi
             echo "OK: $f"
           done
+          python3 -m py_compile device/pipa-mode device/pipa-vpn
+          echo "OK: device/pipa-mode device/pipa-vpn"
 
       - name: Verify LF line endings & scan for accidental secrets
         run: |

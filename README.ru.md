@@ -24,6 +24,7 @@
 - **Память, звук и хранилище:** 4 ГБ ZRAM (`zstd`, 8 потоков, `swappiness=100`, `page-cluster=0`), `read_ahead_kb=128`, PulseAudio 48 kHz (`avoid-resampling=yes`).
 - **Адаптивная частота экрана:** 120 Гц в работе / 60 Гц в покое (гистерезис 2 кадра), выбор 30/48/50/60/90/120/144 Гц.
 - **Защита батареи:** аппаратное ограничение заряда на 80% (`night_charging`).
+- **Режим безопасности «Дома / Вне дома / Авто» и VPN без утечки DNS (`device/pipa-mode`, `device/pipa-vpn`):** фаервол `iptables`/`ip6tables` (`PIPA_IN`/`PIPA_IN6`) до старта сети, автопереключение по SSID (`95-pipa-mode`), рандомизация MAC при сканировании Wi-Fi (`zz-pipa-security.conf`), системный TUN VPN с DoH (`127.0.0.1:1053`) и обходом для NTP (UDP/123).
 
 ### 2. Нативный рабочий стол 11″ (`shell/`)
 - **Композитор Wayland на 2880×1800 (`DPR 2.0`, 1440×900 dp)** с приоритетом `Nice=-5`.
@@ -42,7 +43,7 @@
 
 ### 4. Windows 11 Mirror и экосистема (`mirror/`, `extras/`)
 - **Клиент зеркалирования для Windows 11 (`mirror/`, `tools/mirror_win.py`):** Electron-клиент по USB (`adb forward`) и Wi-Fi (`ssh -W`), WebCodecs H.264/HEVC (Annex B), передача мыши, клавиатуры и буфера обмена ([docs/WINDOWS-MIRROR.md](docs/WINDOWS-MIRROR.md)).
-- **Telegram-бот центр управления (`extras/tg-bot/`):** опциональный self-hosted бот (`aiogram 3`, 20 команд, защита по `OWNER_ID` через `/pair`, `/term`, `/cam`, `/clip`, локальный DLNA-сервер для ТВ, управление ПК).
+- **Telegram-бот центр управления (`extras/tg-bot/`):** опциональный self-hosted бот (`aiogram 3`, 21 команда, защита по `OWNER_ID` через `/pair`, `/mode`, `/term`, `/cam`, `/clip`, локальный DLNA-сервер для ТВ, управление ПК).
 - **Windows ПК-агент (`extras/pc-agent/pc_agent.py`):** лёгкий локальный HTTP-агент без сторонних зависимостей (только подсети RFC1918 + заголовок `X-Pipa-Token`).
 
 ---
@@ -58,7 +59,7 @@
 
 ## Тесты и CI
 
-В **[GitHub Actions](.github/workflows/ci.yml)** автоматически прогоняются **91 Python/C++ unit-тест** (`tools/tests/`) и **8 Node-тестов Mirror** (`mirror/tests/`) на Linux и Windows:
+В **[GitHub Actions](.github/workflows/ci.yml)** автоматически прогоняются **99 Python/C++ unit-тестов** (`tools/tests/`) и **8 Node-тестов Mirror** (`mirror/tests/`) на Linux и Windows:
 
 ```sh
 python3 -m pip install -r extras/tg-bot/requirements.txt

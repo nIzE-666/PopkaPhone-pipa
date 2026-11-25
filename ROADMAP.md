@@ -2,6 +2,10 @@
 
 This roadmap outlines planned milestones for evolving `PopkaPhone-pipa` into a reusable, well-tested desktop Linux shell and hardware-enablement toolkit for `SM8250` / Halium 13 tablets.
 
+## Completed in v0.2.0-pipa
+- **System audit & hardening:** clean shutdown sync hook for dual-boot (`naomi-pipa-sync`), `WebSurface` redraw fix, external IME fix, `.desktop` `TryExec`/executable validation & icon paths, `code_pin` `ENOMEM` safety, 4 GB ZRAM, unified `zz-90-naomi.conf` journald limit, and audio jack udev permissions.
+- **Travel security & DNS-leak-free VPN:** Home/Away/Auto firewall (`device/pipa-mode`, `pipa-firewall.service`, `95-pipa-mode`, `zz-pipa-security.conf`), sing-box TUN VPN with DoH + NTP bypass (`device/pipa-vpn`), and Telegram Control Hub `/mode` panel.
+
 ## Near-Term (v0.2.x)
 - **Camera UX & media pipeline (`shell/apps/camera/`):**
   - Mux PulseAudio microphone input into MP4 H.264 video recordings (`ffmpeg` audio+video pipeline).

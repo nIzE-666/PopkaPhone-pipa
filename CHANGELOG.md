@@ -1,5 +1,28 @@
 # Changelog
 
+## v0.2.0-pipa — 2026-11-25
+
+System hardening, travel security mode, DNS-leak-free TUN VPN, and compositor/desktop fixes verified on Xiaomi Pad 6 (`pipa`).
+
+### System Audit & Shell Hardening
+- **Dual-boot & shutdown safety (`device/install-shell.sh`, `device/naomi-pipa-slot-switch`):** added `/usr/lib/systemd/system-shutdown/naomi-pipa-sync` to cleanly flush `userdata.img` (`loop0`) and `f2fs` `/mnt/android-host-data` before rebooting into Android (`_a`); hardened slot-switch D-Bus timeouts and `naomid` `wlp1s0` Wi-Fi detection.
+- **Compositor, WebSurface & input (`shell/app/`):** fixed `WebSurface` redraw tracking so offscreen/unmapped surfaces stop burning GPU frames; fixed external IME handling in `app_launcher.cpp`; hardened `code_pin.cpp` against `ENOMEM` when pinning memory; expanded `.desktop` icon lookup paths (`~/.local/share/icons`, `Adwaita`, `suru`) and added `TryExec` + executable validation in `system_tools.cpp`.
+- **Memory, storage & audio (`device/shell-prepare`, `device/install-shell.sh`, `device/91-pipa-audio-jack.rules`):** enforced 4 GB `zstd` ZRAM, unified persistent journald limit via `zz-90-naomi.conf` (`SystemMaxUse=100M`, overriding `lxc-android-config.conf`), masked failing/conflicting Ubuntu Touch units (`repowerd`, `keep-display-on-during-boot`, `dpkg-db-backup`), and added udev group `audio` permissions for the headset jack (`kona-mtp-snd-card*Jack*`).
+
+### Security / Travel Mode & DNS-Leak-Free VPN
+- **Home / Away / Auto Security Mode (`device/pipa-mode`, `device/pipa-firewall.service`, `device/95-pipa-mode`, `device/zz-pipa-security.conf`):**
+  - Dedicated `iptables`/`ip6tables` chains (`PIPA_IN` / `PIPA_IN6`) loaded before `network-pre.target` — Home mode restricts SSH (`22`) and DLNA (`18766`) to configured `home_subnets` + USB; Away mode blocks all unsolicited inbound Wi-Fi traffic while preserving USB cable access.
+  - NetworkManager dispatcher (`95-pipa-mode`) automatically switches modes on `wlp1s0` SSID changes, toggles Wi-Fi power-save, optionally starts a default VPN profile away from home, and sends optional Telegram notices.
+  - Enabled Wi-Fi scan MAC randomization (`zz-pipa-security.conf`) to prevent probe-request tracking outside home.
+- **DNS-Leak-Free TUN VPN (`device/pipa-vpn`):** sing-box TUN (`popka-tun0`) with DoH (`127.0.0.1:1053`) pushed to NetworkManager `dnsmasq` over D-Bus (`SetServersEx`), LAN DNS bootstrap restricted strictly to VPN server domains (preventing circular DNS deadlocks), UDP/123 NTP `direct` bypass for `systemd-timesyncd`, and IPv6 disabled on the tunnel interface.
+- **Telegram Control Hub `/mode` (`extras/tg-bot/`):** added `/mode [home|away|auto]` command (21 registered commands), main dashboard quick button (`🎒 Режим Дома/Дорога`), and live interactive security panel.
+
+### Quality & Tests
+- Added **`tools/tests/test_pipa_mode.py`** covering travel-mode resolution, config fallbacks, dynamic firewall descriptions, `TabletDriver` travel-mode helpers, and `pipa-vpn` DoH/NTP/bootstrap TUN config generation (**99 Python & C++ harness unit tests** + **8 Node Mirror tests**).
+- Extended GitHub Actions CI to syntax-check `device/95-pipa-mode`, `device/pipa-mode`, and `device/pipa-vpn`.
+
+---
+
 ## v0.1.0-pipa — 2026-11-24
 
 First public Xiaomi Pad 6 (`pipa`) release built on top of upstream [PopaSpinka/PopkaPhone](https://github.com/PopaSpinka/PopkaPhone) (`25c1d6b`, MIT) — **181 files changed (+20,811 / −1,063 lines)**.

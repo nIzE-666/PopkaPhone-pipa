@@ -43,8 +43,9 @@ Upstream `PopkaPhone` (commit `25c1d6b`) targeted Google Pixel 5 (`redfin`, Snap
 | **Pro Settings** | Basic phone/desktop toggles | 24-hour/12-hour clock, seconds, warm Night Filter overlay (`0–60%`), terminal & clipboard preferences (`InterfacePage`), live SM8250 CPU governor/thermals/ZRAM/service toggles (`SystemPage`), Mouse & VPN pages |
 | **SM8250 power & tuning** | Pixel SM7250 `policy0/6/7`, Google charger nodes | `schedutil` + input boost, unlocked C-states, L3/LLCC/DDR/NPU devfreq, 4 GB `zstd` ZRAM, `read_ahead_kb=128`, PulseAudio 48 kHz, hardware 80% charge limit (`night_charging`) |
 | **Windows 11 Mirror** | macOS Electron viewer only | Cross-platform Windows 11 Electron client (`mirror/`, `tools/mirror_win.py`) over USB (`adb forward`) & Wi-Fi (`ssh -W`) with WebCodecs H.264/HEVC Annex B |
-| **Companion ecosystem** | None | Optional self-hosted Telegram Control Hub (`extras/tg-bot/`, 20 commands, `/term`, `/cam`, `/clip`, LAN DLNA server) & zero-dependency Windows LAN PC Agent (`extras/pc-agent/pc_agent.py`) |
-| **Automated tests** | Manual device benchmarks | **91 Python unit tests** (`tools/tests/`) + **8 Node mirror tests** (`mirror/tests/`) running automatically in GitHub Actions CI |
+| **Companion ecosystem** | None | Optional self-hosted Telegram Control Hub (`extras/tg-bot/`, 21 commands, `/mode`, `/term`, `/cam`, `/clip`, LAN DLNA server) & zero-dependency Windows LAN PC Agent (`extras/pc-agent/pc_agent.py`) |
+| **Travel security & VPN** | None | Home/Away/Auto `iptables`/`ip6tables` firewall (`device/pipa-mode`), NM SSID auto-switch + MAC scan randomization, and DNS-leak-free TUN VPN (`device/pipa-vpn`, DoH + NTP bypass) |
+| **Automated tests** | Manual device benchmarks | **99 Python unit tests** (`tools/tests/`) + **8 Node mirror tests** (`mirror/tests/`) running automatically in GitHub Actions CI |
 
 ![PopkaPhone on Xiaomi Pad 6: clean 2880x1800 desktop with 24-hour top bar](docs/img/pipa-desktop.jpg)
 
@@ -164,7 +165,7 @@ Host-side Python unit tests, C++ unit harnesses (for display geometry, keyboard 
 # Install optional bot test dependencies (required for extras/tg-bot test suite)
 python3 -m pip install -r extras/tg-bot/requirements.txt
 
-# Run all 91 Python & C++ harness unit tests
+# Run all 99 Python & C++ harness unit tests
 python3 -m unittest discover -s tools/tests -v
 
 # Run all 8 Windows/macOS Mirror tests (Node.js 20+)
@@ -180,12 +181,12 @@ node --test mirror/tests/keyboard.test.js mirror/tests/stream.test.js
 | Path | Description |
 |---|---|
 | `shell/` | Qt 6 / C++ / QML desktop shell (`app/`), HWC2 display backend (`display/`), hardware daemon (`naomid/`), browser (`apps/web/`), terminal (`term/`), **native dual-camera app (`apps/camera/`)**, libretro launcher (`apps/game/`), keyboard (`input/`), Venus stream (`stream/`), device profile (`device_profile.cpp`) |
-| `device/` | On-device scripts: `shell-prepare` (SM8250 & ZRAM tuning), `install-shell.sh`, `devroot.sh`, `naomi-camera`, `naomi-pipa-slot-switch`, `naomi-telegram`, `naomi-deepseek` |
+| `device/` | On-device scripts & configs: `shell-prepare` (SM8250 & 4 GB ZRAM), `install-shell.sh`, `devroot.sh`, `pipa-mode` + `pipa-firewall.service` + `95-pipa-mode` + `zz-pipa-security.conf` (Home/Away/Auto firewall & MAC randomization), `pipa-vpn` (DNS-leak-free TUN VPN), `91-pipa-audio-jack.rules`, `naomi-camera`, `naomi-pipa-slot-switch`, `naomi-telegram`, `naomi-deepseek` |
 | `tablet/boot-switch/` | Minimal Android app & Quick Settings tile to reboot safely from Android (`_a`) into Ubuntu Touch (`_b`) |
 | `mirror/` | Electron Mirror client for Windows 11 & macOS (`build-win.ps1`, WebCodecs H.264/HEVC, `mirror/tests/`) |
-| `extras/tg-bot/` | Optional self-hosted Telegram Control Hub (`aiogram 3`, 20 commands, `/term`, `/cam`, `/clip`, LAN DLNA server) |
+| `extras/tg-bot/` | Optional self-hosted Telegram Control Hub (`aiogram 3`, 21 commands, `/mode`, `/term`, `/cam`, `/clip`, LAN DLNA server) |
 | `extras/pc-agent/` | Optional zero-dependency Windows LAN PC companion agent (`pc_agent.py`, RFC1918 guard + token auth) |
-| `tools/` | Host CLI tools (`pipa.py`, `mirror_win.py`) and 91 automated unit tests (`tools/tests/`) |
+| `tools/` | Host CLI tools (`pipa.py`, `mirror_win.py`) and 99 automated unit tests (`tools/tests/`) |
 | `docs/` | Installation guides (`PIPA-INSTALL.en.md`, `PIPA-INSTALL.md`), deep SM8250 audit (`PIPA.md`), Windows Mirror guide, and upstream technical notes |
 
 ---
