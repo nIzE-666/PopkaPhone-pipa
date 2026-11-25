@@ -25,9 +25,10 @@ WebSurface::WebSurface(QQuickItem *parent) : QWaylandQuickShellSurfaceItem(paren
 {
     // новый кадр поверхности — текстуру своего узла грузить заново (solidNode)
     connect(this, &QWaylandQuickItem::surfaceChanged, this, [this] {
+        disconnect(m_redrawConn);
         m_fresh = true;
         if (QWaylandSurface *s = surface())
-            connect(s, &QWaylandSurface::redraw, this, [this] { m_fresh = true; }, Qt::UniqueConnection);
+            m_redrawConn = connect(s, &QWaylandSurface::redraw, this, [this] { m_fresh = true; });
     });
 }
 
@@ -80,11 +81,12 @@ static QSGSimpleTextureNode *solidNode(QWaylandQuickItem *item, QSGNode *oldNode
         delete oldNode;
         own = new QSGSimpleTextureNode;
         own->setOwnsTexture(true);
+        fresh = true;
     }
-    // Кадр — в текстуру на каждой перерисовке, как было. Пробовали грузить только по QWaylandSurface::redraw (fresh):
-    // окно Telegram (wl_shm) замирало на первом кадре «Загрузка…» (23 ноября 2026) — откат до разбора
-    own->setTexture(item->window()->createTextureFromImage(image));
-    fresh = false;
+    if (fresh || !own->texture()) {
+        own->setTexture(item->window()->createTextureFromImage(image));
+        fresh = false;
+    }
     own->setFiltering(item->smooth() ? QSGTexture::Linear : QSGTexture::Nearest);
     own->setRect(QRectF(0, 0, item->width(), item->height()));
     // видимая часть кадра (wp_viewport: буфер у Wine больше окна)

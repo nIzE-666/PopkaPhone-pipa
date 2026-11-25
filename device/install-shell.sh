@@ -58,11 +58,11 @@ install)
         rm -rf /var/log/journal/*
         systemctl restart systemd-journald
     elif [ "$TARGET" = pipa ]; then
-        # /var/log на pipa лежит на 52 ГБ /userdata: единый лимит 100 МБ сохраняет ранние логи загрузки.
+        # /var/log на pipa лежит на 52 ГБ /userdata: zz-90-naomi.conf перекрывает lxc-android-config.conf (500M).
         mkdir -p /etc/systemd/journald.conf.d
-        rm -f /etc/systemd/journald.conf.d/pipa-size.conf
+        rm -f /etc/systemd/journald.conf.d/pipa-size.conf /etc/systemd/journald.conf.d/90-naomi.conf
         printf '# НаомиФон (pipa): единый лимит журнала на /userdata\n[Journal]\nSystemMaxUse=100M\nRuntimeMaxUse=32M\n' \
-            > /etc/systemd/journald.conf.d/90-naomi.conf
+            > /etc/systemd/journald.conf.d/zz-90-naomi.conf
         systemctl restart systemd-journald || true
     fi
     install_runtime

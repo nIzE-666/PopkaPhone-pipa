@@ -64,17 +64,18 @@ pipa_disk_memory() {
     echo 200 > /proc/sys/vm/watermark_scale_factor
     echo 32768 > /proc/sys/vm/min_free_kbytes
     [ -w /proc/sys/vm/kswapd_threads ] && echo 1 > /proc/sys/vm/kswapd_threads 2>/dev/null || true
-    # Сжатая оперативка ZRAM (3 ГБ, zstd): при 5.5 GiB ОЗУ без swap браузер + Telegram + DeepSeek + Waydroid
+    # Сжатая оперативка ZRAM (4 ГБ, zstd): при 5.5 GiB ОЗУ без swap браузер + Telegram + Stream Tube + Waydroid
     # упираются в память. /dev/zram0 и zstd уже собраны в ядре pipa.
     if [ -b /dev/zram0 ] && [ -w /sys/block/zram0/disksize ] && ! grep -q '^/dev/zram0 ' /proc/swaps 2>/dev/null; then
         swapoff /dev/zram0 2>/dev/null || true
         echo 1 > /sys/block/zram0/reset 2>/dev/null || true
         grep -qw zstd /sys/block/zram0/comp_algorithm 2>/dev/null && echo zstd > /sys/block/zram0/comp_algorithm 2>/dev/null || true
-        echo 3221225472 > /sys/block/zram0/disksize 2>/dev/null || true
+        echo 4294967296 > /sys/block/zram0/disksize 2>/dev/null || true
         mkswap /dev/zram0 >/dev/null 2>&1 && swapon -p 100 /dev/zram0 2>/dev/null || true
     fi
+    [ -w /sys/block/zram0/queue/read_ahead_kb ] && echo 0 > /sys/block/zram0/queue/read_ahead_kb 2>/dev/null || true
     [ -w /proc/sys/vm/page-cluster ] && echo 0 > /proc/sys/vm/page-cluster 2>/dev/null || true
-    [ -w /proc/sys/vm/swappiness ] && echo 100 > /proc/sys/vm/swappiness 2>/dev/null || true
+    [ -w /proc/sys/vm/swappiness ] && echo 80 > /proc/sys/vm/swappiness 2>/dev/null || true
 }
 
 # Пост-загрузочная настройка SM8250 (kona) на pipa: в Halium свойство vendor.post_boot.parsed=1 не срабатывает,

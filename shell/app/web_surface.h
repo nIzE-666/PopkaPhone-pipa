@@ -4,6 +4,7 @@
 // шейдером маски (ролик 1080p60: видеочип 75–82 % → 56–60 %, прогон 19 ноября 2026, docs/AUDIT.md, этап 1).
 #pragma once
 
+#include <QMetaObject>
 #include <QRectF>
 #include <QWaylandQuickShellSurfaceItem>
 
@@ -97,6 +98,7 @@ private:
     qreal m_pixel = 0;
     bool m_opaque = false;
     bool m_fresh = true;   // пришёл новый кадр — текстуру грузить заново (solidNode)
+    QMetaObject::Connection m_redrawConn;
     bool m_pointerFrames = false;
     bool m_touchToPointer = false;
     int m_touchScrollSpeed = 100;

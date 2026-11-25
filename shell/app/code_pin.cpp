@@ -31,7 +31,8 @@ long pinOnce(std::set<std::tuple<uint64_t, uint64_t, uint64_t>> &done)
         return -1;
     char line[1024];
     long bytes = 0;
-    bool refused = false;
+    bool permDenied = false;
+    bool noMem = false;
     while (fgets(line, sizeof line, maps)) {
         uint64_t from = 0, to = 0, inode = 0;
         char perms[8] = "";
@@ -45,11 +46,17 @@ long pinOnce(std::set<std::tuple<uint64_t, uint64_t, uint64_t>> &done)
             continue;
         if (syscall(SYS_mlock2, from, to - from, MLOCK_ONFAULT) == 0)
             bytes += long(to - from);
-        else if (errno == ENOMEM || errno == EPERM)
-            refused = true;
+        else if (errno == EPERM)
+            permDenied = true;
+        else if (errno == ENOMEM)
+            noMem = true;
     }
     fclose(maps);
-    return refused && !bytes ? -1 : bytes >> 20;
+    if (permDenied && !bytes)
+        return -1;
+    if (noMem && !bytes && done.size() <= 1)
+        return -1;
+    return bytes >> 20;
 }
 
 } // namespace

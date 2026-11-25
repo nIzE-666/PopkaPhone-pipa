@@ -30,12 +30,12 @@ AppLauncher::AppLauncher(const QString &waylandSocket, double density)
     m_env.insert("WAYLAND_DISPLAY", waylandSocket);
     m_env.insert("QT_QPA_PLATFORM", "wayland");
     m_env.insert("EGL_PLATFORM", "wayland");
+    m_env.insert("HYBRIS_EGLPLATFORM", "wayland");
     m_env.insert("QT_WAYLAND_DISABLE_WINDOWDECORATION", "1");
     // Дробная плотность 2,75: программа рисует в пикселях панели (буфер 1:1 с экраном), а оболочка
     // показывает окно в своих логических точках — без размытия (docs/SHELL.md, «Окна программ»).
     m_env.insert("QT_SCALE_FACTOR", QString::number(density));
     m_env.insert("QT_SCALE_FACTOR_ROUNDING_POLICY", "PassThrough");
-    m_env.insert("QT_IM_MODULE", "naomi");
     for (const char *name : {"QT_QPA_EGLFS_INTEGRATION", "QT_PLUGIN_PATH", "NAOMI_TRACE",
                              "NAOMI_FRAMESTATS", "NAOMI_QML"})
         m_env.remove(name);
@@ -243,6 +243,15 @@ qint64 AppLauncher::run(const QString &app, const QString &program, double scale
 {
     auto *proc = new QProcess(this);
     QProcessEnvironment env = m_env;
+    if (program.startsWith(m_appsDir + u'/')) {
+        // Встроенные приложения Naomi линкуют статический плагин ввода naomi-input
+        env.insert("QT_IM_MODULE", "naomi");
+    } else {
+        // Внешние Linux-приложения используют стандартный Wayland text-input-v3
+        env.insert("QT_IM_MODULE", "wayland");
+        env.insert("QT_IM_MODULES", "wayland");
+        env.insert("QT_WAYLAND_TEXT_INPUT_PROTOCOL", "zwp_text_input_v3");
+    }
     if (scale > 0) {
         env.insert("QT_SCALE_FACTOR", QString::number(scale));
         env.insert("NAOMI_DESK_APP", app);   // метка программы стола — и её потомкам (deskApp)

@@ -120,11 +120,17 @@ QString resolveDesktopIcon(const QString &icon)
     if (icon.startsWith(u'/'))
         return QFile::exists(icon) ? QUrl::fromLocalFile(icon).toString() : QString();
     static const QStringList dirs = {
+        QDir::homePath() + QStringLiteral("/.local/share/icons/hicolor/128x128/apps"),
+        QDir::homePath() + QStringLiteral("/.local/share/icons/hicolor/64x64/apps"),
+        QDir::homePath() + QStringLiteral("/.local/share/icons/hicolor/scalable/apps"),
         QStringLiteral("/usr/share/icons/hicolor/128x128/apps"),
         QStringLiteral("/usr/share/icons/hicolor/64x64/apps"),
         QStringLiteral("/usr/share/icons/hicolor/48x48/apps"),
         QStringLiteral("/usr/share/icons/hicolor/256x256/apps"),
         QStringLiteral("/usr/share/icons/hicolor/scalable/apps"),
+        QStringLiteral("/usr/share/icons/Adwaita/scalable/apps"),
+        QStringLiteral("/usr/share/icons/Adwaita/scalable/devices"),
+        QStringLiteral("/usr/share/icons/suru/apps/scalable"),
         QStringLiteral("/usr/share/pixmaps"),
     };
     for (const QString &dir : dirs) {
@@ -647,7 +653,7 @@ void SystemTools::refreshLinuxApps()
             QFile f(dir.filePath(file));
             if (!f.open(QIODevice::ReadOnly | QIODevice::Text))
                 continue;
-            QString type, name, nameRu, execLine, icon;
+            QString type, name, nameRu, execLine, tryExec, icon;
             bool noDisplay = false, hidden = false, terminal = false, inEntry = false;
             for (const QByteArray &raw : f.readAll().split('\n')) {
                 const QString line = QString::fromUtf8(raw).trimmed();
@@ -665,6 +671,8 @@ void SystemTools::refreshLinuxApps()
                     name = line.mid(5);
                 else if (line.startsWith(QLatin1String("Exec=")))
                     execLine = line.mid(5);
+                else if (line.startsWith(QLatin1String("TryExec=")))
+                    tryExec = line.mid(8);
                 else if (line.startsWith(QLatin1String("Icon=")))
                     icon = line.mid(5);
                 else if (line == QLatin1String("NoDisplay=true"))
@@ -676,12 +684,17 @@ void SystemTools::refreshLinuxApps()
             }
             if (type != QLatin1String("Application") || noDisplay || hidden || execLine.isEmpty())
                 continue;
+            if (!tryExec.isEmpty()) {
+                const QString resolvedTry = tryExec.startsWith(u'/') ? tryExec : QStandardPaths::findExecutable(tryExec);
+                if (resolvedTry.isEmpty() || !executable(resolvedTry))
+                    continue;
+            }
             const QStringList parts = parseExecCommand(execLine);
             if (parts.isEmpty())
                 continue;
             const QString prog = parts.constFirst();
             const QString resolvedProg = prog.startsWith(u'/') ? prog : QStandardPaths::findExecutable(prog);
-            if (resolvedProg.isEmpty())
+            if (resolvedProg.isEmpty() || !executable(resolvedProg))
                 continue;
             const QString displayName = !nameRu.isEmpty() ? nameRu : name;
             if (displayName.isEmpty())
