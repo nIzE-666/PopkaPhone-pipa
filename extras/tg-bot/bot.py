@@ -60,6 +60,7 @@ from ui import (
     build_clipboard_panel,
     build_confirm_dialog,
     build_main_dashboard,
+    build_mode_panel,
     build_network_panel,
     build_pc_detail_panel,
     build_pc_list_panel,
@@ -341,6 +342,16 @@ def create_router(ctx: AppContext) -> Router:
     @router.message(Command("vpn"))
     async def cmd_vpn(message: Message) -> None:
         text, rows = await _render_vpn(ctx)
+        await edit_or_send(message, text, rows)
+
+    @router.message(Command("mode"))
+    async def cmd_mode(message: Message) -> None:
+        parts = (message.text or "").split()
+        notice = ""
+        if len(parts) > 1 and parts[1].lower() in ("home", "away", "auto"):
+            _, notice = await ctx.tablet.set_travel_mode(parts[1].lower())
+        info = await ctx.tablet.get_travel_mode()
+        text, rows = build_mode_panel(info, notice=notice)
         await edit_or_send(message, text, rows)
 
     @router.message(Command("services"))
@@ -754,6 +765,20 @@ def create_router(ctx: AppContext) -> Router:
                 return
             status = await ctx.tablet.get_status()
             text, rows = build_tablet_panel(status, notice=notice)
+            await edit_or_send(callback, text, rows)
+            return
+
+        # --- Travel / Security Mode Controls ---
+        if scope == "md":
+            notice = ""
+            if action == "open":
+                await callback.answer()
+            elif action == "set" and args:
+                target = args[0]
+                await callback.answer(f"Переключаю режим: {target}…")
+                _, notice = await ctx.tablet.set_travel_mode(target)
+            info = await ctx.tablet.get_travel_mode()
+            text, rows = build_mode_panel(info, notice=notice)
             await edit_or_send(callback, text, rows)
             return
 

@@ -191,13 +191,14 @@ class CommandCatalogTests(unittest.TestCase):
     def test_all_required_commands_present_and_valid(self):
         errors = commands.validate_command_catalog()
         self.assertEqual(errors, [])
-        self.assertLessEqual(len(commands.BOT_COMMANDS), 20)
+        self.assertLessEqual(len(commands.BOT_COMMANDS), 25)
         names = {c.command for c in commands.BOT_COMMANDS}
         self.assertTrue(self.REQUIRED_COMMANDS.issubset(names))
         wave5_cmds = {"term", "clip", "scenes", "tv_text", "tv_cast"}
         self.assertTrue(wave5_cmds.issubset(names))
         self.assertIn("cam", names)
-        self.assertEqual(len(commands.BOT_COMMANDS), 20)
+        self.assertIn("mode", names)
+        self.assertEqual(len(commands.BOT_COMMANDS), 21)
 
     def test_help_text_documents_every_registered_command(self):
         help_text = commands.build_help_text()
@@ -278,6 +279,16 @@ class CallbackAndUITests(unittest.TestCase):
             ui.build_clipboard_panel(True, "Привет с планшета", cfg.pcs[0].name, True, "Текст с ПК (Windows)"),
             ui.build_scenes_panel(report_lines=["🎬 Сценарий «Кино»:", "1. ✅ Samsung TV уже включён."]),
             ui.build_terminal_panel("/home/pipa/projects", command="ls -la", rc=0, output="total 4\nREADME.md"),
+            ui.build_mode_panel(
+                {
+                    "configured": "auto",
+                    "active": "home",
+                    "ssid": "Home5G",
+                    "firewall": "активен (SSH/DLNA только 192.168.1.0/24 + USB)",
+                    "vpn": "Выкл",
+                    "wifi_powersave": "off",
+                }
+            ),
             ui.build_camera_panel(torch_on=False),
             ui.build_camera_panel(torch_on=True, notice="Фонарик включён."),
         ]
@@ -295,12 +306,13 @@ class CallbackAndUITests(unittest.TestCase):
                     callbacks.unpack_cb(btn.callback_data)
         self.assertGreater(total_buttons, 80)
 
-        # Verify Wave 5 & Wave 6 specific buttons exist on main dashboard, Samsung TV, and Camera panel
+        # Verify Wave 5, Wave 6 & Travel Mode buttons exist on main dashboard, Samsung TV, and Camera panel
         main_cbs = {btn.callback_data for row in panels[0][1] for btn in row}
         self.assertIn("sc:open", main_cbs)
         self.assertIn("cl:open", main_cbs)
         self.assertIn("tm:open", main_cbs)
         self.assertIn("m:cam", main_cbs)
+        self.assertIn("md:open", main_cbs)
 
         cam_off_text, cam_off_rows = panels[-2]
         cam_on_text, cam_on_rows = panels[-1]

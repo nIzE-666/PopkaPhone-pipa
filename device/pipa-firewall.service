@@ -1,0 +1,12 @@
+[Unit]
+Description=Pipa Firewall & Travel Mode (Home/Away)
+After=local-fs.target
+Before=network-pre.target NetworkManager.service ssh.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/pipa-mode apply
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target

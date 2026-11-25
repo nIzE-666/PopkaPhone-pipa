@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import os
 import re
 import secrets
@@ -1197,3 +1198,20 @@ class TabletDriver:
             return False, f"Приложение камеры не найдено: {target}"
         except OSError as exc:
             return False, f"Не удалось запустить Камеру: {exc}"
+
+    # --- Home / Away / Auto Security Mode (/usr/local/bin/pipa-mode) ---
+    async def get_travel_mode(self) -> Dict[str, Any]:
+        rc, out, err = await self._run_cmd(["sudo", "-n", "/usr/local/bin/pipa-mode", "status", "--json"], timeout=6.0)
+        if rc == 0 and out.strip():
+            try:
+                return json.loads(out)
+            except Exception:
+                pass
+        return {"configured": "unknown", "active": "unknown", "ssid": "", "vpn": "", "firewall": err.strip() or "n/a"}
+
+    async def set_travel_mode(self, mode: str) -> Tuple[bool, str]:
+        if mode not in ("home", "away", "auto"):
+            return False, f"Неизвестный режим: {mode}"
+        rc, out, err = await self._run_cmd(["sudo", "-n", "/usr/local/bin/pipa-mode", mode], timeout=25.0)
+        msg = (out or err or "").strip()
+        return rc == 0, msg or f"Режим переключён: {mode}"

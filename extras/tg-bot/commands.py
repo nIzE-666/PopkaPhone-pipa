@@ -56,6 +56,12 @@ BOT_COMMANDS: Tuple[CommandSpec, ...] = (
         details="Показывает доступные VPN-профили (/usr/local/bin/vpn), статус подключения и кнопки переключения.",
     ),
     CommandSpec(
+        command="mode",
+        description="Режим безопасности (Дома / Вне дома / Авто)",
+        usage="/mode [home|away|auto]",
+        details="Управляет режимом «Вне дома»: фаервол, авто-VPN и экономия Wi-Fi (/usr/local/bin/pipa-mode).",
+    ),
+    CommandSpec(
         command="services",
         description="Службы (Waydroid, DeepSeek, Desktop Commander)",
         usage="/services",

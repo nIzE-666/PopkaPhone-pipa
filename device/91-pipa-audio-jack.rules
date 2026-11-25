@@ -1,0 +1,1 @@
+SUBSYSTEM=="input", KERNEL=="event*", ATTRS{name}=="kona-mtp-snd-card*Jack*", GROUP="audio", MODE="0660"

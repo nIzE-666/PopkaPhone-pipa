@@ -143,15 +143,18 @@ def build_main_dashboard(
             ButtonSpec("🛡 VPN", pack_cb("v", "open")),
         ],
         [
-            ButtonSpec("⚙️ Службы", pack_cb("sv", "open")),
+            ButtonSpec("🎒 Режим Дома/Дорога", pack_cb("md", "open")),
             ButtonSpec("📸 Скриншот", pack_cb("t", "shot")),
         ],
         [
+            ButtonSpec("⚙️ Службы", pack_cb("sv", "open")),
             ButtonSpec("📷 Камера", pack_cb("m", "cam")),
-            ButtonSpec("🔔 Уведомления", pack_cb("al", "open")),
         ],
         [
+            ButtonSpec("🔔 Уведомления", pack_cb("al", "open")),
             ButtonSpec("📊 Сводка", pack_cb("m", "status")),
+        ],
+        [
             ButtonSpec("🔄 Обновить", pack_cb("m", "home")),
         ],
     ]
@@ -936,6 +939,44 @@ def build_camera_panel(
         ],
         [
             ButtonSpec("⬅️ Меню", pack_cb("m", "home")),
+        ],
+    ]
+    return "\n".join(lines), rows
+
+
+def build_mode_panel(info: Dict[str, Any], notice: str = "") -> Tuple[str, KeyboardRows]:
+    cfg = str(info.get("configured") or "auto")
+    act = str(info.get("active") or "unknown")
+    ssid = str(info.get("ssid") or "нет Wi-Fi")
+    fw = str(info.get("firewall") or "—")
+    vpn = str(info.get("vpn") or "—")
+    ps = str(info.get("wifi_powersave") or "—")
+    act_badge = "🏠 Дома" if act == "home" else ("🎒 Вне дома" if act == "away" else f"⚪ {act}")
+    cfg_badge = {"auto": "🔄 Авто (по Wi-Fi)", "home": "🏠 Всегда Дома", "away": "🎒 Всегда Вне дома"}.get(cfg, cfg)
+    lines = [
+        "🛡 <b>Режим безопасности (Дома / Вне дома)</b>",
+        "",
+        f"• <b>Сейчас активно:</b> {act_badge}",
+        f"• <b>Настройка:</b> {cfg_badge}",
+        f"• <b>Wi-Fi:</b> <code>{esc(ssid)}</code>",
+        f"• <b>Фаервол:</b> {esc(fw)}",
+        f"• <b>VPN:</b> {esc(vpn)}",
+        f"• <b>Wi-Fi энергосбережение:</b> {esc(ps)}",
+        "",
+        "<i>В режиме «Вне дома» все входящие порты по Wi-Fi (включая SSH и медиасервер) полностью закрыты, включён авто-VPN и экономия Wi-Fi. По USB-кабелю доступ сохраняется.</i>",
+    ]
+    if notice:
+        lines.extend(["", f"💬 {esc(notice)}"])
+    rows: KeyboardRows = [
+        [
+            ButtonSpec(("✅ " if cfg == "auto" else "") + "🔄 Авто", pack_cb("md", "set", "auto")),
+            ButtonSpec(("✅ " if cfg == "home" else "") + "🏠 Дома", pack_cb("md", "set", "home")),
+            ButtonSpec(("✅ " if cfg == "away" else "") + "🎒 Вне дома", pack_cb("md", "set", "away")),
+        ],
+        [
+            ButtonSpec("🔄 Обновить", pack_cb("md", "open")),
+            ButtonSpec("🛡 VPN", pack_cb("v", "open")),
+            ButtonSpec("🏠 Главная", pack_cb("m", "home")),
         ],
     ]
     return "\n".join(lines), rows

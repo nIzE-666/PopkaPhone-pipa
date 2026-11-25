@@ -1,0 +1,362 @@
+#!/usr/bin/env python3
+"""System-wide TUN VPN switcher for Xiaomi Pad 6 (pipa) Ubuntu Touch.
+
+- Prevents DNS leaks via sing-box DoH (127.0.0.1:1053) + NM dnsmasq D-Bus.
+- Prevents circular DNS deadlock by routing ONLY VPN server_hosts via direct/LAN DNS
+  (both in NM dnsmasq SetServersEx and in sing-box dns.rules).
+- Bypasses UDP/123 NTP via direct (auto_detect_interface) so systemd-timesyncd works.
+- Disables IPv6 on popka-tun0.
+
+Install as /usr/local/bin/vpn and configure profiles under /etc/popka-vpn/profiles.json.
+"""
+import ipaddress
+import json
+import os
+import socket
+import subprocess
+import sys
+import time
+
+BASE = "/etc/popka-vpn"
+PROFILES_DIR = os.path.join(BASE, "profiles")
+META_PATH = os.path.join(BASE, "profiles.json")
+STATE_PATH = "/run/popka-vpn.state"
+TUN_CFG = "/run/popka-vpn-tun.json"
+DNS_PORT = 1053
+
+
+def need_root():
+    if os.geteuid() != 0:
+        os.execvp("sudo", ["sudo", sys.executable, __file__] + sys.argv[1:])
+
+
+def load_meta(path: str = META_PATH) -> dict:
+    with open(path, "r", encoding="utf-8") as f:
+        return json.load(f)
+
+
+def run(cmd, check=False):
+    return subprocess.run(cmd, text=True, capture_output=True, check=check)
+
+
+def get_lan_dns_servers() -> list:
+    servers = []
+    try:
+        with open("/run/NetworkManager/no-stub-resolv.conf", "r", encoding="utf-8") as f:
+            for line in f:
+                parts = line.strip().split()
+                if len(parts) >= 2 and parts[0] == "nameserver":
+                    servers.append(parts[1])
+    except OSError:
+        pass
+    return servers
+
+
+def get_server_domains(hosts: list) -> list:
+    domains = []
+    for h in hosts:
+        try:
+            ipaddress.ip_address(h)
+        except ValueError:
+            if h and h not in domains:
+                domains.append(h)
+    return domains
+
+
+def set_dnsmasq_entries(entries: list) -> bool:
+    """entries is a list of lists of strings, e.g. [['127.0.0.1#1053'], ['192.168.1.1', 'vpn.example.com']]."""
+    if not entries:
+        return False
+    arr = "[" + ", ".join("[" + ", ".join(f"'{x}'" for x in e) + "]" for e in entries) + "]"
+    r = run([
+        "gdbus", "call", "--system",
+        "--dest", "org.freedesktop.NetworkManager.dnsmasq",
+        "--object-path", "/uk/org/thekelleys/dnsmasq",
+        "--method", "uk.org.thekelleys.SetServersEx",
+        arr,
+    ])
+    return r.returncode == 0
+
+
+def restore_lan_dns():
+    servers = get_lan_dns_servers()
+    if servers:
+        set_dnsmasq_entries([[s] for s in servers])
+
+
+def apply_vpn_dns(server_domains: list):
+    entries = [[f"127.0.0.1#{DNS_PORT}"]]
+    lan_dns = get_lan_dns_servers()
+    bootstrap = lan_dns[0] if lan_dns else "1.1.1.1"
+    for dom in server_domains:
+        entries.append([bootstrap, dom])
+    set_dnsmasq_entries(entries)
+
+
+def resolve_ips(hosts: list) -> list:
+    ips = set()
+    for h in hosts:
+        try:
+            ipaddress.ip_address(h)
+            ips.add(h)
+            continue
+        except ValueError:
+            pass
+        try:
+            for fam, _, _, _, sa in socket.getaddrinfo(h, None):
+                if fam in (socket.AF_INET, socket.AF_INET6):
+                    ips.add(sa[0])
+        except Exception:
+            pass
+    return sorted(ips)
+
+
+def build_tun_config(socks_port: int, bypass_ips: list, server_domains: list, bootstrap_dns: str = "1.1.1.1") -> dict:
+    exclude = [
+        "127.0.0.0/8",
+        "10.0.0.0/8",
+        "172.16.0.0/12",
+        "192.168.0.0/16",
+        "169.254.0.0/16",
+        "224.0.0.0/4",
+        "::1/128",
+        "fc00::/7",
+        "fe80::/10",
+    ]
+    for ip in bypass_ips:
+        addr = ipaddress.ip_address(ip)
+        exclude.append(f"{ip}/32" if addr.version == 4 else f"{ip}/128")
+
+    dns_servers = [
+        {
+            "tag": "remote",
+            "type": "https",
+            "server": "1.1.1.1",
+            "server_port": 443,
+            "path": "/dns-query",
+            "detour": "proxy",
+        },
+        {
+            "tag": "bootstrap",
+            "type": "udp",
+            "server": bootstrap_dns,
+        },
+    ]
+    dns_rules = []
+    if server_domains:
+        dns_rules.append({"domain": server_domains, "server": "bootstrap"})
+
+    return {
+        "log": {"level": "warn"},
+        "dns": {
+            "servers": dns_servers,
+            "rules": dns_rules,
+            "final": "remote",
+        },
+        "inbounds": [
+            {
+                "type": "direct",
+                "tag": "dns-in",
+                "listen": "127.0.0.1",
+                "listen_port": DNS_PORT,
+            },
+            {
+                "type": "tun",
+                "tag": "tun-in",
+                "interface_name": "popka-tun0",
+                "address": ["172.19.0.1/30"],
+                "mtu": 1400,
+                "auto_route": True,
+                "strict_route": False,
+                "route_exclude_address": exclude,
+                "stack": "gvisor",
+            },
+        ],
+        "outbounds": [
+            {
+                "type": "socks",
+                "tag": "proxy",
+                "server": "127.0.0.1",
+                "server_port": socks_port,
+            },
+            {"type": "direct", "tag": "direct"},
+        ],
+        "route": {
+            "auto_detect_interface": True,
+            "default_domain_resolver": "remote",
+            "rules": [
+                {"inbound": ["dns-in"], "action": "hijack-dns"},
+                {"action": "sniff"},
+                {"action": "hijack-dns", "protocol": "dns"},
+                {"port": 123, "network": "udp", "outbound": "direct"},
+                {"ip_is_private": True, "outbound": "direct"},
+            ],
+            "final": "proxy",
+        },
+    }
+
+
+def write_tun_config(socks_port: int, bypass_ips: list, server_domains: list):
+    lan_dns = get_lan_dns_servers()
+    bootstrap_dns = lan_dns[0] if lan_dns else "1.1.1.1"
+    cfg = build_tun_config(socks_port, bypass_ips, server_domains, bootstrap_dns=bootstrap_dns)
+    with open(TUN_CFG, "w", encoding="utf-8") as f:
+        json.dump(cfg, f, indent=2)
+
+
+def stop_vpn():
+    need_root()
+    restore_lan_dns()
+    run(["systemctl", "stop", "popka-vpn-tun.service"])
+    run(["systemctl", "stop", "popka-vpn-core.service"])
+    if os.path.exists(STATE_PATH):
+        os.remove(STATE_PATH)
+    print("VPN OFF")
+
+
+def start_vpn(name: str):
+    need_root()
+    meta = load_meta()
+    if name not in meta:
+        matches = [k for k in meta if k.lower() == name.lower()]
+        if not matches:
+            print(f"Unknown profile: {name}")
+            print("Available:", ", ".join(sorted(meta)))
+            sys.exit(1)
+        name = matches[0]
+    info = meta[name]
+    engine = info["engine"]
+    port = info["socks_port"]
+    cfg_path = os.path.join(PROFILES_DIR, f"{name}.json")
+    server_hosts = info.get("server_hosts", [])
+    server_domains = get_server_domains(server_hosts)
+
+    # Restore LAN DNS first so server_hosts resolve cleanly without proxy
+    restore_lan_dns()
+    bypass = resolve_ips(server_hosts)
+
+    run(["systemctl", "stop", "popka-vpn-tun.service"])
+    run(["systemctl", "stop", "popka-vpn-core.service"])
+
+    if engine == "xray":
+        exec_cmd = f"/usr/local/bin/xray run -c {cfg_path}"
+    elif engine == "sing-box":
+        exec_cmd = f"/usr/local/bin/sing-box run -c {cfg_path}"
+    elif engine == "naive":
+        exec_cmd = f"/usr/local/bin/naive {cfg_path}"
+    else:
+        raise RuntimeError(f"Unknown engine {engine}")
+
+    core_unit = f"""[Unit]
+Description=Popka VPN core ({name})
+After=network-online.target
+
+[Service]
+Type=simple
+ExecStart={exec_cmd}
+Restart=on-failure
+RestartSec=2
+"""
+    with open("/etc/systemd/system/popka-vpn-core.service", "w", encoding="utf-8") as f:
+        f.write(core_unit)
+
+    write_tun_config(port, bypass, server_domains)
+    tun_unit = f"""[Unit]
+Description=Popka VPN TUN ({name})
+After=popka-vpn-core.service
+Requires=popka-vpn-core.service
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/sing-box run -c {TUN_CFG}
+ExecStartPost=-/bin/sh -c 'for i in 1 2 3 4 5 6; do [ -w /proc/sys/net/ipv6/conf/popka-tun0/disable_ipv6 ] && {{ echo 1 > /proc/sys/net/ipv6/conf/popka-tun0/disable_ipv6; break; }}; sleep 0.25; done'
+Restart=on-failure
+RestartSec=2
+"""
+    with open("/etc/systemd/system/popka-vpn-tun.service", "w", encoding="utf-8") as f:
+        f.write(tun_unit)
+
+    run(["systemctl", "daemon-reload"], check=True)
+    run(["systemctl", "start", "popka-vpn-core.service"], check=True)
+
+    for _ in range(30):
+        try:
+            s = socket.create_connection(("127.0.0.1", port), timeout=0.3)
+            s.close()
+            break
+        except Exception:
+            time.sleep(0.2)
+    else:
+        print(f"ERROR: VPN core ({engine}) did not open 127.0.0.1:{port}")
+        print(run(["journalctl", "-u", "popka-vpn-core.service", "-n", "25", "--no-pager"]).stdout)
+        stop_vpn()
+        sys.exit(1)
+
+    run(["systemctl", "start", "popka-vpn-tun.service"], check=True)
+    time.sleep(1.2)
+    st = run(["systemctl", "is-active", "popka-vpn-tun.service"]).stdout.strip()
+    if st != "active":
+        print("ERROR: popka-vpn-tun failed to start:")
+        print(run(["journalctl", "-u", "popka-vpn-tun.service", "-n", "30", "--no-pager"]).stdout)
+        stop_vpn()
+        sys.exit(1)
+
+    apply_vpn_dns(server_domains)
+    with open(STATE_PATH, "w", encoding="utf-8") as f:
+        f.write(f"{name}\n")
+    print(
+        f"VPN ON: {name} (engine={engine}, socks=127.0.0.1:{port}, "
+        f"tun=popka-tun0, dns=DoH/127.0.0.1:{DNS_PORT}, bootstrap={server_domains})"
+    )
+
+
+def show_status():
+    core = run(["systemctl", "is-active", "popka-vpn-core.service"]).stdout.strip()
+    tun = run(["systemctl", "is-active", "popka-vpn-tun.service"]).stdout.strip()
+    active = open(STATE_PATH, encoding="utf-8").read().strip() if os.path.exists(STATE_PATH) else "none"
+    print(f"Profile: {active} | core: {core} | tun: {tun}")
+
+
+def main():
+    args = sys.argv[1:]
+    if not args or args[0] in ("-h", "--help", "help"):
+        print("Usage: vpn list | vpn status | vpn on <profile> | vpn off | vpn sync-dns")
+        return
+    cmd = args[0]
+    if cmd == "list":
+        meta = load_meta()
+        active = open(STATE_PATH, encoding="utf-8").read().strip() if os.path.exists(STATE_PATH) else ""
+        for k in sorted(meta):
+            mark = "*" if k == active else " "
+            print(f"{mark} {k}" if mark == "*" else k)
+    elif cmd == "status":
+        show_status()
+    elif cmd == "off":
+        stop_vpn()
+    elif cmd == "on":
+        if len(args) > 1:
+            name = args[1]
+        else:
+            meta = load_meta()
+            if not meta:
+                print("No VPN profiles configured in", META_PATH)
+                sys.exit(1)
+            name = sorted(meta)[0]
+        start_vpn(name)
+    elif cmd == "sync-dns":
+        need_root()
+        tun = run(["systemctl", "is-active", "popka-vpn-tun.service"]).stdout.strip()
+        if tun == "active":
+            active = open(STATE_PATH, encoding="utf-8").read().strip() if os.path.exists(STATE_PATH) else ""
+            meta = load_meta()
+            domains = get_server_domains(meta.get(active, {}).get("server_hosts", []))
+            apply_vpn_dns(domains)
+        else:
+            restore_lan_dns()
+    else:
+        print("Unknown command:", cmd)
+        sys.exit(1)
+
+
+if __name__ == "__main__":
+    main()

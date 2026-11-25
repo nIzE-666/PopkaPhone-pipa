@@ -1,0 +1,288 @@
+#!/usr/bin/env python3
+"""Home / Away / Auto security & travel mode controller for Xiaomi Pad 6 (pipa).
+
+Controls:
+- Stateful IPv4/IPv6 iptables firewall (dedicated PIPA_IN / PIPA_IN6 chains):
+  - Always allows loopback, ESTABLISHED/RELATED, USB networking (usb0/rndis0), and waydroid0.
+  - Home mode additionally allows SSH (22), local DLNA media server (18766), and ICMP ping
+    strictly from configured home_subnets.
+  - Away mode blocks all unsolicited inbound Wi-Fi traffic (SSH, DLNA, etc.).
+- Automatic Wi-Fi power-save toggle (off at home for low latency, on away for battery life).
+- Optional automatic VPN activation when away on untrusted Wi-Fi networks.
+- Optional Telegram owner notification on automatic mode transitions.
+
+Configuration file: /userdata/pipa-mode/config.json
+"""
+import json
+import os
+import re
+import subprocess
+import sys
+import urllib.request
+
+CFG_DIR = "/userdata/pipa-mode"
+CFG_PATH = os.path.join(CFG_DIR, "config.json")
+MODE_PATH = os.path.join(CFG_DIR, "mode")
+ACTIVE_PATH = "/run/pipa-mode.active"
+BOT_ENV_PATH = "/home/phablet/.config/pipa-bot/bot.env"
+VPN_BIN = "/usr/local/bin/vpn"
+
+DEFAULT_CFG = {
+    "home_ssids": [],
+    "home_subnets": ["192.168.1.0/24"],
+    "default_vpn_profile": "",
+    "away_auto_vpn": True,
+    "away_wifi_powersave": True,
+    "notify_telegram": True,
+}
+
+
+def need_root():
+    if os.geteuid() != 0:
+        os.execvp("sudo", ["sudo", sys.executable, __file__] + sys.argv[1:])
+
+
+def run(cmd, check=False):
+    return subprocess.run(cmd, text=True, capture_output=True, check=check)
+
+
+def load_cfg(path: str = CFG_PATH) -> dict:
+    cfg = dict(DEFAULT_CFG)
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+            if isinstance(data, dict):
+                cfg.update(data)
+    except (OSError, json.JSONDecodeError):
+        pass
+    return cfg
+
+
+def read_configured_mode(path: str = MODE_PATH) -> str:
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            m = f.read().strip().lower()
+        if m in ("auto", "home", "away"):
+            return m
+    except OSError:
+        pass
+    return "auto"
+
+
+def resolve_mode(configured: str, ssid: str, home_ssids: list) -> tuple:
+    """Resolve effective mode ('home' or 'away') and Russian human-readable reason."""
+    if configured == "home":
+        return "home", "вручную"
+    if configured == "away":
+        return "away", "вручную"
+    if ssid and ssid in (home_ssids or []):
+        return "home", f"домашний Wi-Fi ({ssid})"
+    return "away", (f"чужой Wi-Fi ({ssid})" if ssid else "нет Wi-Fi")
+
+
+def format_firewall_description(fw_ok: bool, active: str, home_subnets: list) -> str:
+    if not fw_ok:
+        return "выкл"
+    if active == "home":
+        nets = ", ".join(home_subnets or DEFAULT_CFG["home_subnets"])
+        return f"активен (SSH/DLNA только {nets} + USB)"
+    return "активен (все порты Wi-Fi закрыты, только USB)"
+
+
+def get_wifi_ssid() -> str:
+    r = run(["iw", "dev", "wlp1s0", "link"])
+    if r.returncode == 0:
+        m = re.search(r"^\s*SSID:\s*(.+)$", r.stdout, re.MULTILINE)
+        if m:
+            return m.group(1).strip()
+    return ""
+
+
+def get_wifi_powersave() -> str:
+    r = run(["iw", "dev", "wlp1s0", "get", "power_save"])
+    if r.returncode == 0:
+        return r.stdout.strip().replace("Power save: ", "")
+    return "n/a"
+
+
+def get_vpn_summary() -> str:
+    tun = run(["systemctl", "is-active", "popka-vpn-tun.service"]).stdout.strip()
+    prof = ""
+    try:
+        with open("/run/popka-vpn.state", "r", encoding="utf-8") as f:
+            prof = f.read().strip()
+    except OSError:
+        pass
+    if tun == "active":
+        return f"Вкл ({prof or 'TUN'})"
+    return "Выкл"
+
+
+def apply_firewall(effective_mode: str, home_subnets: list):
+    # IPv4 dedicated chain PIPA_IN hooked at top of INPUT (never drops live ESTABLISHED SSH!)
+    run(["iptables", "-N", "PIPA_IN"])
+    run(["iptables", "-F", "PIPA_IN"])
+
+    rules_v4 = [
+        ["-A", "PIPA_IN", "-i", "lo", "-j", "ACCEPT"],
+        ["-A", "PIPA_IN", "-m", "conntrack", "--ctstate", "ESTABLISHED,RELATED", "-j", "ACCEPT"],
+        ["-A", "PIPA_IN", "-i", "usb0", "-j", "ACCEPT"],
+        ["-A", "PIPA_IN", "-i", "rndis0", "-j", "ACCEPT"],
+        ["-A", "PIPA_IN", "-i", "waydroid0", "-j", "ACCEPT"],
+        ["-A", "PIPA_IN", "-i", "popka-tun0", "-m", "conntrack", "--ctstate", "ESTABLISHED,RELATED", "-j", "ACCEPT"],
+        ["-A", "PIPA_IN", "-p", "icmp", "--icmp-type", "destination-unreachable", "-j", "ACCEPT"],
+        ["-A", "PIPA_IN", "-p", "icmp", "--icmp-type", "time-exceeded", "-j", "ACCEPT"],
+    ]
+    if effective_mode == "home":
+        for subnet in home_subnets:
+            rules_v4.append(["-A", "PIPA_IN", "-s", subnet, "-p", "tcp", "--dport", "22", "-j", "ACCEPT"])
+            rules_v4.append(["-A", "PIPA_IN", "-s", subnet, "-p", "tcp", "--dport", "18766", "-j", "ACCEPT"])
+            rules_v4.append(["-A", "PIPA_IN", "-s", subnet, "-p", "icmp", "--icmp-type", "echo-request", "-j", "ACCEPT"])
+    rules_v4.append(["-A", "PIPA_IN", "-j", "DROP"])
+
+    for r in rules_v4:
+        run(["iptables"] + r, check=True)
+
+    # Ensure INPUT jumps to PIPA_IN once at rule #1
+    if run(["iptables", "-C", "INPUT", "-j", "PIPA_IN"]).returncode != 0:
+        run(["iptables", "-I", "INPUT", "1", "-j", "PIPA_IN"], check=True)
+
+    # IPv6 dedicated chain PIPA_IN6
+    run(["ip6tables", "-N", "PIPA_IN6"])
+    run(["ip6tables", "-F", "PIPA_IN6"])
+    rules_v6 = [
+        ["-A", "PIPA_IN6", "-i", "lo", "-j", "ACCEPT"],
+        ["-A", "PIPA_IN6", "-m", "conntrack", "--ctstate", "ESTABLISHED,RELATED", "-j", "ACCEPT"],
+        ["-A", "PIPA_IN6", "-i", "usb0", "-j", "ACCEPT"],
+        ["-A", "PIPA_IN6", "-i", "rndis0", "-j", "ACCEPT"],
+        ["-A", "PIPA_IN6", "-p", "ipv6-icmp", "-j", "ACCEPT"],
+        ["-A", "PIPA_IN6", "-j", "DROP"],
+    ]
+    for r in rules_v6:
+        run(["ip6tables"] + r)
+    if run(["ip6tables", "-C", "INPUT", "-j", "PIPA_IN6"]).returncode != 0:
+        run(["ip6tables", "-I", "INPUT", "1", "-j", "PIPA_IN6"])
+
+
+def notify_telegram(text: str):
+    """Best-effort short notice to owner chat when auto-switching modes."""
+    try:
+        env = {}
+        with open(BOT_ENV_PATH, "r", encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if "=" in line and not line.startswith("#"):
+                    k, v = line.split("=", 1)
+                    env[k.strip()] = v.strip().strip('"').strip("'")
+        token = env.get("PIPA_BOT_TOKEN") or env.get("BOT_TOKEN")
+        chat_id = env.get("PIPA_OWNER_ID") or env.get("OWNER_ID")
+        if not token or not chat_id:
+            return
+        url = f"https://api.telegram.org/bot{token}/sendMessage"
+        payload = json.dumps({"chat_id": chat_id, "text": text}).encode("utf-8")
+        req = urllib.request.Request(url, data=payload, headers={"Content-Type": "application/json"})
+        with urllib.request.urlopen(req, timeout=6):
+            pass
+    except Exception:
+        pass
+
+
+def apply_mode(trigger: str = "manual") -> str:
+    need_root()
+    cfg = load_cfg()
+    configured = read_configured_mode()
+    ssid = get_wifi_ssid()
+    home_ssids = cfg.get("home_ssids") or []
+    home_subnets = cfg.get("home_subnets") or DEFAULT_CFG["home_subnets"]
+
+    effective, reason = resolve_mode(configured, ssid, home_ssids)
+
+    prev = ""
+    try:
+        with open(ACTIVE_PATH, "r", encoding="utf-8") as f:
+            prev = f.read().strip().split()[0]
+    except (OSError, IndexError):
+        pass
+
+    apply_firewall(effective, home_subnets)
+
+    # Wi-Fi powersave & optional auto-VPN behavior
+    if effective == "away":
+        if cfg.get("away_wifi_powersave", True):
+            run(["iw", "dev", "wlp1s0", "set", "power_save", "on"])
+        if cfg.get("away_auto_vpn", True) and ssid and os.path.isfile(VPN_BIN):
+            tun = run(["systemctl", "is-active", "popka-vpn-tun.service"]).stdout.strip()
+            prof = str(cfg.get("default_vpn_profile") or "").strip()
+            if tun != "active" and prof:
+                run([VPN_BIN, "on", prof])
+    else:
+        run(["iw", "dev", "wlp1s0", "set", "power_save", "off"])
+
+    # Keep VPN DNS synced after any network event
+    if os.path.isfile(VPN_BIN):
+        run([VPN_BIN, "sync-dns"])
+
+    with open(ACTIVE_PATH, "w", encoding="utf-8") as f:
+        f.write(f"{effective} {ssid or '-'}\n")
+
+    if trigger == "auto" and prev and prev != effective and cfg.get("notify_telegram", True) and ssid:
+        badge = "🏠 Дома" if effective == "home" else "🎒 Вне дома"
+        notify_telegram(f"🛡 Планшет автоматически переключился в режим {badge} (Wi-Fi: {ssid}).")
+
+    badge = "Дома" if effective == "home" else "Вне дома"
+    return f"Режим: {badge} ({reason}) | настройка: {configured}"
+
+
+def build_status() -> dict:
+    cfg = load_cfg()
+    configured = read_configured_mode()
+    ssid = get_wifi_ssid()
+    active = "unknown"
+    try:
+        with open(ACTIVE_PATH, "r", encoding="utf-8") as f:
+            active = f.read().strip().split()[0]
+    except (OSError, IndexError):
+        pass
+    fw_ok = run(["iptables", "-C", "INPUT", "-j", "PIPA_IN"]).returncode == 0
+    home_subnets = cfg.get("home_subnets") or DEFAULT_CFG["home_subnets"]
+    fw_desc = format_firewall_description(fw_ok, active, home_subnets)
+    return {
+        "configured": configured,
+        "active": active,
+        "ssid": ssid,
+        "home_ssids": cfg.get("home_ssids", []),
+        "firewall": fw_desc,
+        "vpn": get_vpn_summary(),
+        "wifi_powersave": get_wifi_powersave(),
+    }
+
+
+def main():
+    args = sys.argv[1:]
+    cmd = args[0] if args else "status"
+    if cmd == "status":
+        st = build_status()
+        if "--json" in args:
+            print(json.dumps(st, ensure_ascii=False))
+        else:
+            print(
+                f"Active: {st['active']} (configured: {st['configured']}) | "
+                f"SSID: {st['ssid'] or '-'} | FW: {st['firewall']} | "
+                f"VPN: {st['vpn']} | WiFi PS: {st['wifi_powersave']}"
+            )
+    elif cmd in ("home", "away", "auto"):
+        need_root()
+        os.makedirs(CFG_DIR, exist_ok=True)
+        with open(MODE_PATH, "w", encoding="utf-8") as f:
+            f.write(cmd + "\n")
+        print(apply_mode(trigger="manual"))
+    elif cmd == "apply":
+        trig = "auto" if "--auto" in args else "manual"
+        print(apply_mode(trigger=trig))
+    else:
+        print("Usage: pipa-mode status [--json] | home | away | auto | apply [--auto]")
+        sys.exit(1)
+
+
+if __name__ == "__main__":
+    main()
