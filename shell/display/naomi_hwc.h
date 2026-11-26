@@ -53,6 +53,7 @@ public:
     bool requestRefresh(int hz);
     // Режим панели — NaomiDisplayMode (из потока интерфейса); вызовы composer — под m_hwcMutex вместе с present().
     bool setDisplayMode(int mode);
+    bool setColorWarmth(double warmth);
     NaomiFrameSnapshot snapshot() const { return m_timer.snapshot(); }
     NaomiDisplaySizes sizes() const
     {
@@ -87,6 +88,7 @@ private:
     ANativeWindowBuffer *m_shown = nullptr;   // буфер прошлого кадра: свободен, когда панель покажет следующий
     void *m_setConfigSym = nullptr;   // HWC2::impl::Display::setActiveConfigWithConstraints
     void *m_vsyncPeriodSym = nullptr;
+    void *m_setColorTransformSym = nullptr; // HWC2::impl::Display::setColorTransform
     QSize m_size;                     // кадр Qt в ориентации интерфейса
     QSize m_panel;                    // панель в координатах HWC
     bool m_deviceLayer = false;       // слой DEVICE для растяжения на телефоне
@@ -109,6 +111,7 @@ private:
     // ниже — только поток интерфейса
     QObject m_gui;                        // живёт в потоке интерфейса: туда поток отрисовки шлёт «вывел»
     QTimer *m_watchdog = nullptr;         // отданный кадр так и не дошёл до вывода
+    QTimer *m_idleTimer = nullptr;        // сбрасывает частоту в m_idleHz после паузы без кадров
     QList<QPointer<QWindow>> m_waiting;   // окна, ждущие своего кадра
     bool m_inFlight = false;              // кадр отдан Qt Quick, его обмен буферов ещё не кончился
     bool m_flushPosted = false;

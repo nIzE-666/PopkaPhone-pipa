@@ -10,12 +10,14 @@
 namespace {
 
 const DeviceProfile redfin{"redfin", false, true, 2.75, 432, 0, 90, {{60, 0}, {90, 1}},
-                           {{{0, 6, 1363200}, {6, 1, 1478400}, {7, 1, 1766400}}}};
+                           {{{0, 6, 1363200}, {6, 1, 1478400}, {7, 1, 1766400}}},
+                           true, true, true, true, 0};
 const DeviceProfile pipa{"pipa", true, false, 2.0, 309, 90, 60,
                          {},
-                         {{{0, 4, 0}, {4, 3, 0}, {7, 1, 0}}}};
+                         {{{0, 4, 0}, {4, 3, 0}, {7, 1, 0}}},
+                         false, false, true, true, 30};
 const DeviceProfile unknown{"unknown", false, false, redfin.density, redfin.panelDpi, 0, 60, {},
-                            redfin.clusters};
+                            redfin.clusters, true, true, true, true, 0};
 
 const DeviceProfile *byName(QString name)
 {
@@ -116,6 +118,8 @@ DeviceProfile::ThermalPaths DeviceProfile::thermalPaths() const
         if (tablet ? type.startsWith("cpu-0-") || type.startsWith("cpu-1-") : type == "cpu-1-max-step")
             paths.cpu.append(temperature);
         if (type == "skin-therm")
+            paths.skin = temperature;
+        else if (type == "quiet_therm" && paths.skin.isEmpty())
             paths.skin = temperature;
     }
     return paths;

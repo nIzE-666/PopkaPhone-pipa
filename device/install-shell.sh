@@ -212,19 +212,26 @@ EOF
         sed -i '/^OnFailure=naomi-safe.service$/d' "$UNITS/naomi-shell.service"
         sed -i '/^\[Unit\]$/a After=naomi-pipa-awake.service\nConflicts=repowerd.service\nWants=naomi-pipa-awake.service' \
             "$UNITS/naomi-shell.service"
+        sed -i '/^Environment=NAOMI_FRAMESTATS=1$/a Environment=NAOMI_WEB_NO_SPARE=1' \
+            "$UNITS/naomi-shell.service"
+        # Держим только перехват кнопки питания (naomi-shell сама гасит/будит экран);
+        # kernel wake_lock и глубокий сон теперь динамически ведёт naomid (Perf).
         cat > "$UNITS/naomi-pipa-awake.service" <<'EOF'
 [Unit]
-Description=Keep the Xiaomi Pad 6 awake during the NaomiPhone session
+Description=Keep power key owned by NaomiPhone shell on Xiaomi Pad 6
 After=systemd-logind.service
 PartOf=naomi-shell.service
 StopWhenUnneeded=yes
 
 [Service]
-# Удерживаем также блокировку autosleep ядра Halium, если интерфейс доступен.
-ExecStartPre=-/bin/sh -c 'if [ -w /sys/power/wake_lock ] && [ -w /sys/power/wake_unlock ]; then echo naomi-pipa > /sys/power/wake_lock; fi'
-ExecStart=/usr/bin/systemd-inhibit --what=sleep:idle:handle-power-key --mode=block --who=NaomiPhone --why "Tablet display session" /usr/bin/sleep infinity
-ExecStopPost=-/bin/sh -c 'if [ -w /sys/power/wake_unlock ]; then echo naomi-pipa > /sys/power/wake_unlock; fi'
+ExecStart=/usr/bin/systemd-inhibit --what=handle-power-key --mode=block --who=NaomiPhone --why "Tablet power button" /usr/bin/sleep infinity
 EOF
+        # Второй Wi-Fi интерфейс wlan1 на pipa не используется — не даём NM тратить энергию на его сканирование.
+        mkdir -p /etc/NetworkManager/conf.d
+        printf '%s\n' '# НаомиФон (pipa): wlan1 не занят — без фоновых сканов' '[keyfile]' \
+            'unmanaged-devices=interface-name:wlan1' > "$NM_WLAN1"
+        nmcli general reload conf >/dev/null 2>&1 || true
+        nmcli device set wlan1 managed no >/dev/null 2>&1 || true
         # Чистый сброс буферов userdata.img (loop0) и f2fs /mnt/android-host-data перед ребутом в One UI (_a).
         mkdir -p /usr/lib/systemd/system-shutdown
         cat > /usr/lib/systemd/system-shutdown/naomi-pipa-sync <<'EOF'
@@ -236,15 +243,16 @@ mount -o remount,ro /mnt/android-host-data 2>/dev/null || true
 exit 0
 EOF
         chmod 755 /usr/lib/systemd/system-shutdown/naomi-pipa-sync
-        # Маскируем конфликтующие службы Ubuntu Touch: keep-display-on-during-boot тянет repowerd
-        # и держит graphical.target 300 секунд при выключенном lightdm; dpkg-db-backup падает на RO-корне.
+        # Маскируем конфликтующие и ненужные на Wi-Fi-планшете без NFC службы Ubuntu Touch:
+        # keep-display-on-during-boot тянет repowerd; dpkg-db-backup падает на RO-корне;
+        # nfcd (нет NFC) и ofono (нет сотового модема) зря жгли CPU и будили ядра.
         systemctl mask repowerd.service keep-display-on-during-boot.service >/dev/null 2>&1 || true
-        systemctl stop motd-news.timer dpkg-db-backup.timer >/dev/null 2>&1 || true
-        systemctl mask motd-news.timer dpkg-db-backup.timer dpkg-db-backup.service >/dev/null 2>&1 || true
+        systemctl stop motd-news.timer dpkg-db-backup.timer nfcd.service ofono.service >/dev/null 2>&1 || true
+        systemctl mask motd-news.timer dpkg-db-backup.timer dpkg-db-backup.service nfcd.service ofono.service >/dev/null 2>&1 || true
         systemctl daemon-reload
         systemctl enable naomid.service naomi-shell.service >/dev/null 2>&1 || true
         systemctl restart naomid.service
-        echo "pipa: установлено naomid ($(systemctl is-active naomid)), naomi-shell (автозапуск); repowerd/keep-display-on/dpkg-db-backup выключены"
+        echo "pipa: установлено naomid ($(systemctl is-active naomid)), naomi-shell (автозапуск); repowerd/nfcd/ofono/dpkg-db-backup выключены"
         exit 0
     fi
 
@@ -293,11 +301,13 @@ uninstall)
         systemctl disable --now naomi-shell.service naomid.service >/dev/null 2>&1 || true
         systemctl stop naomi-pipa-awake.service >/dev/null 2>&1 || true
         rm -f "$UNITS/naomi-shell.service" "$UNITS/naomid.service" "$UNITS/naomi-pipa-awake.service" \
-              "$BUS_POLICY" /usr/lib/systemd/system-shutdown/naomi-pipa-sync \
-              /etc/systemd/journald.conf.d/90-naomi.conf
+              "$BUS_POLICY" "$NM_WLAN1" /usr/lib/systemd/system-shutdown/naomi-pipa-sync \
+              /etc/systemd/journald.conf.d/90-naomi.conf /etc/systemd/journald.conf.d/zz-90-naomi.conf
         rm -rf "$LIB"
         systemctl unmask repowerd.service keep-display-on-during-boot.service motd-news.timer \
-                         dpkg-db-backup.timer dpkg-db-backup.service >/dev/null 2>&1 || true
+                         dpkg-db-backup.timer dpkg-db-backup.service nfcd.service ofono.service >/dev/null 2>&1 || true
+        nmcli general reload conf >/dev/null 2>&1 || true
+        nmcli device set wlan1 managed yes >/dev/null 2>&1 || true
         systemctl daemon-reload
         systemctl reload dbus
         exit 0

@@ -162,7 +162,7 @@ Window {
     property Page spare: null
     Timer { id: spareLater; interval: 2000; onTriggered: win.makeSpare() }
     function makeSpare() {
-        if (spare || !profile)
+        if (webNoSpare || spare || !profile)
             return
         spare = pageComponent.createObject(pages, { tabId: -2 })
         spare.url = webNewtab

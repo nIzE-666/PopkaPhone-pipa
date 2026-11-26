@@ -64,10 +64,13 @@ public:
     Q_INVOKABLE void refreshHardwareState();
     Q_INVOKABLE void refreshSystemInfo();
     Q_INVOKABLE void setPowerProfile(const QString &profile);
+    Q_INVOKABLE void setStayAwake(bool on);
+    Q_INVOKABLE void setDeepSuspend(bool on);
     Q_INVOKABLE void toggleService(const QString &id, bool enable);
     Q_INVOKABLE void cleanJournal();
     Q_INVOKABLE void setTimezone(const QString &tz);
     Q_INVOKABLE void syncTime();
+    void setActive(bool on);
 
 signals:
     void changed();

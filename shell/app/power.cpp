@@ -149,7 +149,7 @@ Power::Power()
     else
         qCWarning(lcPower, "не прочитать max_brightness в %s", qPrintable(backlight));
     m_manual = m_brightness = m_settings.value("display/brightness", 0.6).toReal();
-    m_auto = !profile.tablet && m_settings.value("display/auto", true).toBool();
+    m_auto = m_settings.value("display/auto", !profile.tablet).toBool();
     m_adjustKnown = m_settings.contains("display/autoAdjust");
     m_adjust = m_settings.value("display/autoAdjust", 0.0).toReal();
     m_aod = aodSupported() && m_settings.value("display/aod", false).toBool();
@@ -323,14 +323,22 @@ void Power::setScreen(Screen screen)
         screen = Screen::Off;
     if (screen == m_screen)
         return;
-    const bool tablet = DeviceProfile::current().tablet;
+    const auto &profile = DeviceProfile::current();
+    const bool tablet = profile.tablet;
     const bool lit = screen != Screen::Off;   // AOD — та же включённая панель (малое питание — enterDeep)
-    // LCD pipa: выключаем подсветку, оставляя DSI и composer в ON. Кнопки и сеть остаются доступны.
-    if (!tablet && (m_deep || (m_screen != Screen::Off) != lit) && m_setMode
-        && !m_setMode(lit ? NaomiDisplayOn : NaomiDisplayOff))
+    const bool hwOff = profile.displayPowerOff && qgetenv("NAOMI_DISPLAY_POWER_OFF") != "0";
+    // Гасим подсветку до HWC2_POWER_MODE_OFF, чтобы на LCD не было вспышки при снятии питания DSI.
+    if (tablet && !lit && m_backlight)
+        m_backlight->set(0);
+    if ((hwOff || !tablet) && (m_deep || (m_screen != Screen::Off) != lit) && m_setMode) {
+        if (!m_setMode(lit ? NaomiDisplayOn : NaomiDisplayOff)) {
+            if (!tablet)
+                return;
+            qCWarning(lcPower, "HWC2 power mode (%s) не принят — остаётся управление подсветкой", lit ? "ON" : "OFF");
+        }
+    } else if (tablet && !lit && !m_backlight) {
         return;
-    if (tablet && !lit && !m_backlight)
-        return;
+    }
     const bool wasDeep = std::exchange(m_deep, false);
     if (wasDeep) {   // контроллер касаний больше держать незачем
         if (lit)

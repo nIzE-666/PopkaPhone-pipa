@@ -171,6 +171,7 @@ int main(int argc, char **argv)
     ctx->setContextProperty("webStore", &store);
     ctx->setContextProperty("webBridge", &bridge);
     ctx->setContextProperty("webFilter", &filter);
+    ctx->setContextProperty("webNoSpare", qEnvironmentVariableIntValue("NAOMI_WEB_NO_SPARE") != 0);
     QObject::connect(&engine, &QQmlEngine::quit, &app, &QGuiApplication::quit);
     engine.load(QUrl::fromLocalFile(app.applicationDirPath() + "/qml/Main.qml"));
     if (engine.rootObjects().isEmpty())

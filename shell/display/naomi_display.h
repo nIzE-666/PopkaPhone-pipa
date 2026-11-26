@@ -24,6 +24,7 @@ using NaomiRefreshRatesFn = int (*)(int *out, int capacity);   // nullptr — у
 // ступени) — панели. Composer применяет режим со следующим выведенным кадром: после смены нужен кадр.
 enum NaomiDisplayMode : int { NaomiDisplayOff = 0, NaomiDisplayOn = 1, NaomiDisplayDoze = 2 };
 using NaomiSetDisplayModeFn = bool (*)(int mode);
+using NaomiSetColorWarmthFn = bool (*)(double warmth);
 
 // Размеры в пикселях: кадр, который рисует Qt, и панель. Кадр меньше панели — его растягивает дисплей
 // (NAOMI_RENDER, docs/DISPLAY.md, «Кадр меньше панели»).
@@ -39,3 +40,4 @@ inline constexpr const char kNaomiDisplaySizes[] = "naomi_display_sizes";
 inline constexpr const char kNaomiSetRefresh[] = "naomi_set_refresh";
 inline constexpr const char kNaomiRefreshRates[] = "naomi_refresh_rates";
 inline constexpr const char kNaomiSetDisplayMode[] = "naomi_set_display_mode";
+inline constexpr const char kNaomiSetColorWarmth[] = "naomi_set_color_warmth";

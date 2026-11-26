@@ -76,7 +76,7 @@ QtObject {
     }
 
     property Timer poll: Timer {
-        interval: b.open ? 1000 : 5000
+        interval: b.open ? 1000 : 15000
         running: b.live && (b.open || !b.plugged)
         repeat: true
         triggeredOnStart: true

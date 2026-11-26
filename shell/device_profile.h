@@ -21,6 +21,11 @@ struct DeviceProfile
     int defaultHz;
     QList<DisplayMode> displayModes;
     std::array<CpuCluster, 3> clusters;
+    bool hasCellular = true;
+    bool hasNfc = true;
+    bool displayPowerOff = true;
+    bool displayUbwc = true;
+    int idleRefreshHz = 0;
 
     static const DeviceProfile &current();
     QString backlight() const;

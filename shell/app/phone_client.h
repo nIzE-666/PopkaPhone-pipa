@@ -59,6 +59,7 @@ class PhoneClient : public QObject
     Q_PROPERTY(QObject *audio READ audio CONSTANT)
     Q_PROPERTY(QObject *bluetooth READ bluetooth CONSTANT)
     Q_PROPERTY(QObject *sensors READ sensors CONSTANT)
+    Q_PROPERTY(QObject *perf READ perf CONSTANT)
     Q_PROPERTY(QObject *system READ system CONSTANT)   // телефон целиком: call("Reboot"), call("PowerOff")
     Q_PROPERTY(bool available READ available NOTIFY availableChanged)   // naomid работает
 
@@ -73,6 +74,7 @@ public:
     QObject *audio() const { return m_audio; }
     QObject *bluetooth() const { return m_bluetooth; }
     QObject *sensors() const { return m_sensors; }
+    QObject *perf() const { return m_perf; }
     QObject *system() const { return m_system; }
     bool available() const { return m_available; }
 
@@ -83,9 +85,9 @@ signals:
     void availableChanged();
 
 private:
-    QList<BusMirror *> mirrors() const { return {m_battery, m_charge, m_wifi, m_cable, m_cell, m_audio, m_bluetooth, m_sensors}; }
+    QList<BusMirror *> mirrors() const { return {m_battery, m_charge, m_wifi, m_cable, m_cell, m_audio, m_bluetooth, m_sensors, m_perf}; }
 
-    BusMirror *m_battery, *m_charge, *m_wifi, *m_cable, *m_cell, *m_audio, *m_bluetooth, *m_sensors;
+    BusMirror *m_battery, *m_charge, *m_wifi, *m_cable, *m_cell, *m_audio, *m_bluetooth, *m_sensors, *m_perf;
     BusMirror *m_system;   // свойств нет — только вызовы: не слушает
     bool m_available = false;
 };

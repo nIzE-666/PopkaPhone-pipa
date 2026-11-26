@@ -116,6 +116,16 @@ QString findWirelessDevice()
 // (на Pixel — wlan0, на Xiaomi Pad 6 — wlp1s0).
 void applyWifiPowerSave(bool plugged)
 {
+    // Не форкаем iw каждые 30 с: переключаем при смене питания (кабель/батарея) или раз в 10 мин (20 тиков).
+    static bool s_initialized = false;
+    static bool s_lastPlugged = false;
+    static int s_ticksSinceSync = 0;
+    if (s_initialized && s_lastPlugged == plugged && ++s_ticksSinceSync < 20)
+        return;
+    s_initialized = true;
+    s_lastPlugged = plugged;
+    s_ticksSinceSync = 0;
+
     const QString dev = findWirelessDevice();
     if (dev.isEmpty())
         return;

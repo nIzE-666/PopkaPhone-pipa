@@ -1,4 +1,5 @@
 #include "cell.h"
+#include "device_profile.h"
 
 #include <QDBusVariant>
 #include <QDir>
@@ -22,6 +23,8 @@ Cell::Cell(QObject *parent)
     set("Strength", 0);
     set("Operator", QString());
     set("Enabled", QSettings(QLatin1String(STORE), QSettings::IniFormat).value("enabled", true).toBool());
+    if (!DeviceProfile::current().hasCellular)
+        return;
 
     m_refresh.setSingleShot(true);
     m_refresh.setInterval(100);

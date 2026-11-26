@@ -1,4 +1,6 @@
 #include "system_tools.h"
+#include "device_profile.h"
+#include "naomi_display.h"
 
 #include <algorithm>
 #include <QClipboard>
@@ -6,6 +8,7 @@
 #include <QDBusConnection>
 #include <QDBusError>
 #include <QDBusPendingCallWatcher>
+#include <QDBusVariant>
 #include <QDir>
 #include <QFile>
 #include <QFileInfo>
@@ -186,9 +189,22 @@ SystemTools::SystemTools(bool tablet)
                 recordClipboard(cur);
         }
         refreshHardwareState();
-        m_hwTimer.setInterval(3000);
+        m_hwTimer.setInterval(8000);
         connect(&m_hwTimer, &QTimer::timeout, this, &SystemTools::refreshHardwareState);
         m_hwTimer.start();
+    }
+}
+
+void SystemTools::setActive(bool on)
+{
+    if (!m_androidAvailable)
+        return;
+    if (on) {
+        refreshHardwareState();
+        if (!m_hwTimer.isActive())
+            m_hwTimer.start();
+    } else {
+        m_hwTimer.stop();
     }
 }
 
@@ -436,12 +452,21 @@ QString readLocalIp()
 
 void SystemTools::refreshSystemInfo()
 {
-    m_powerProfile = readTrimmedFile(QStringLiteral("/sys/devices/system/cpu/cpufreq/policy0/scaling_governor"));
+    const QDBusMessage profReply = QDBusConnection::systemBus().call(
+        QDBusMessage::createMethodCall(QStringLiteral("org.naomi.Phone"),
+                                       QStringLiteral("/org/naomi/Phone/Perf"),
+                                       QStringLiteral("org.freedesktop.DBus.Properties"),
+                                       QStringLiteral("Get"))
+            << QStringLiteral("org.naomi.Phone.Perf") << QStringLiteral("Profile"),
+        QDBus::Block, 600);
+    if (profReply.type() == QDBusMessage::ReplyMessage && !profReply.arguments().isEmpty()) {
+        m_powerProfile = profReply.arguments().first().value<QDBusVariant>().variant().toString();
+    }
     if (m_powerProfile.isEmpty())
-        m_powerProfile = QStringLiteral("schedutil");
+        m_powerProfile = QStringLiteral("balanced");
 
-    // Temperatures (CPU prime cluster + battery)
-    double cpuC = 0.0, batC = 0.0;
+    // Temperatures (CPU prime cluster + battery + skin quiet_therm/skin-therm)
+    double cpuC = 0.0, batC = 0.0, skinC = 0.0;
     const QDir thermal(QStringLiteral("/sys/class/thermal"));
     for (const QString &z : thermal.entryList({QStringLiteral("thermal_zone*")}, QDir::Dirs)) {
         const QString type = readTrimmedFile(thermal.filePath(z + QStringLiteral("/type")));
@@ -451,6 +476,8 @@ void SystemTools::refreshSystemInfo()
                 cpuC = t;
         } else if (type == QLatin1String("battery")) {
             batC = readTrimmedFile(thermal.filePath(z + QStringLiteral("/temp"))).toDouble() / 1000.0;
+        } else if (type == QLatin1String("quiet_therm") || (type == QLatin1String("skin-therm") && skinC == 0.0)) {
+            skinC = readTrimmedFile(thermal.filePath(z + QStringLiteral("/temp"))).toDouble() / 1000.0;
         }
     }
 
@@ -480,6 +507,7 @@ void SystemTools::refreshSystemInfo()
     m_sysInfo = QVariantMap{
         {QStringLiteral("cpuTemp"), QString::number(cpuC, 'f', 1)},
         {QStringLiteral("batTemp"), QString::number(batC, 'f', 1)},
+        {QStringLiteral("skinTemp"), QString::number(skinC, 'f', 1)},
         {QStringLiteral("zramUsedMb"), zramUsedMb},
         {QStringLiteral("zramTotalMb"), zramTotalMb},
         {QStringLiteral("diskFreeGb"), QString::number(freeGb, 'f', 1)},
@@ -559,22 +587,65 @@ void SystemTools::runSystemCommand(const QString &program, const QStringList &ar
 
 void SystemTools::setPowerProfile(const QString &profile)
 {
+    QString norm = profile.trimmed().toLower();
+    if (norm == QLatin1String("powersave"))
+        norm = QStringLiteral("eco");
+    else if (norm == QLatin1String("schedutil"))
+        norm = QStringLiteral("balanced");
     static const QStringList allowed = {
-        QStringLiteral("powersave"),
-        QStringLiteral("schedutil"),
+        QStringLiteral("eco"),
+        QStringLiteral("balanced"),
         QStringLiteral("performance"),
     };
-    if (!allowed.contains(profile))
+    if (!allowed.contains(norm))
         return;
-    const QString cmd = QStringLiteral(
-        "for p in /sys/devices/system/cpu/cpufreq/policy*/scaling_governor; do "
-        "[ -w \"$p\" ] && echo %1 > \"$p\"; done").arg(profile);
-    const QString label = profile == QLatin1String("powersave") ? QStringLiteral("Эконом (powersave)")
-                        : profile == QLatin1String("performance") ? QStringLiteral("Максимум (performance)")
-                                                                  : QStringLiteral("Баланс (schedutil)");
-    runSystemCommand(QStringLiteral("/usr/bin/sudo"), {QStringLiteral("-n"), QStringLiteral("/bin/sh"), QStringLiteral("-c"), cmd},
-                     QStringLiteral("Профиль CPU: %1").arg(label),
-                     QStringLiteral("Не удалось переключить профиль CPU"));
+
+    QDBusMessage msg = QDBusMessage::createMethodCall(QStringLiteral("org.naomi.Phone"),
+                                                      QStringLiteral("/org/naomi/Phone/Perf"),
+                                                      QStringLiteral("org.naomi.Phone.Perf"),
+                                                      QStringLiteral("SetProfile"));
+    msg << norm;
+    QDBusConnection::systemBus().asyncCall(msg);
+
+    // Заодно переключаем целевую частоту экрана: Эконом 60 Гц, Баланс 120 Гц, Максимум 144 Гц
+    const int targetHz = norm == QLatin1String("eco") ? 60
+                       : norm == QLatin1String("performance") ? 144 : 120;
+    if (auto fn = reinterpret_cast<NaomiSetRefreshFn>(QGuiApplication::platformFunction(kNaomiSetRefresh)))
+        fn(targetHz);
+
+    m_powerProfile = norm;
+    m_systemStatus = norm == QLatin1String("eco")
+        ? QStringLiteral("Профиль: Эконом (60 Гц, CPU/GPU бережно)")
+        : norm == QLatin1String("performance")
+            ? QStringLiteral("Профиль: Максимум (144 Гц, 3.19 ГГц)")
+            : QStringLiteral("Профиль: Баланс (120→30 Гц, холодный простой)");
+    emit systemChanged();
+}
+
+void SystemTools::setStayAwake(bool on)
+{
+    QDBusMessage msg = QDBusMessage::createMethodCall(QStringLiteral("org.naomi.Phone"),
+                                                      QStringLiteral("/org/naomi/Phone/Perf"),
+                                                      QStringLiteral("org.naomi.Phone.Perf"),
+                                                      QStringLiteral("SetStayAwake"));
+    msg << on;
+    QDBusConnection::systemBus().asyncCall(msg);
+    m_systemStatus = on ? QStringLiteral("Режим сервера: сеть и бот не засыпают")
+                        : QStringLiteral("Обычный режим: энергосбережение при выключенном экране");
+    emit systemChanged();
+}
+
+void SystemTools::setDeepSuspend(bool on)
+{
+    QDBusMessage msg = QDBusMessage::createMethodCall(QStringLiteral("org.naomi.Phone"),
+                                                      QStringLiteral("/org/naomi/Phone/Perf"),
+                                                      QStringLiteral("org.naomi.Phone.Perf"),
+                                                      QStringLiteral("SetDeepSuspend"));
+    msg << on;
+    QDBusConnection::systemBus().asyncCall(msg);
+    m_systemStatus = on ? QStringLiteral("Глубокий сон (deep): включён от батареи")
+                        : QStringLiteral("Глубокий сон (deep): выключен");
+    emit systemChanged();
 }
 
 void SystemTools::toggleService(const QString &id, bool enable)

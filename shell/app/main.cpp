@@ -152,14 +152,25 @@ int main(int argc, char **argv)
     std::unique_ptr<DevTrace> trace(qEnvironmentVariableIsSet("NAOMI_TRACE") ? new DevTrace : nullptr);
     // данные службы — пока горит экран или смотрят трансляцию: стол у приставки живёт, пока телефон лежит в AOD, и
     // звук, Bluetooth, Wi-Fi нужны ему свежими (без этого окно звука считало шаг от громкости, устаревшей на минуты)
+    auto notifyPerfDisplay = [&power] {
+        QDBusMessage m = QDBusMessage::createMethodCall(QStringLiteral("org.naomi.Phone"),
+                                                        QStringLiteral("/org/naomi/Phone/Perf"),
+                                                        QStringLiteral("org.naomi.Phone.Perf"),
+                                                        QStringLiteral("SetDisplayOn"));
+        m << power.displayOn();
+        QDBusConnection::systemBus().asyncCall(m);
+    };
     auto onScreen = [&] {
         stats.setActive(power.displayOn());
+        systemTools.setActive(power.displayOn());
         phone.setActive(power.displayOn() || streamService.connected(), power.dozing());
         power.setDesk(streamService.desktop());
+        notifyPerfDisplay();
     };
     QObject::connect(&power, &Power::displayOnChanged, &app, onScreen);
     QObject::connect(&power, &Power::dozingChanged, &app, onScreen);
     QObject::connect(&streamService, &StreamService::changed, &app, onScreen);
+    notifyPerfDisplay();
 
     Spell spell;   // исправление опечаток клавиатуры (spell.h); живёт дольше движка QML
     QQmlApplicationEngine engine;
@@ -275,12 +286,16 @@ int main(int argc, char **argv)
     };
     QDBusServiceWatcher phoneBack(QStringLiteral("org.naomi.Phone"), QDBusConnection::systemBus(),
                                   QDBusServiceWatcher::WatchForRegistration);
-    QObject::connect(&phoneBack, &QDBusServiceWatcher::serviceRegistered, &app, [holdFull] {
+    QObject::connect(&phoneBack, &QDBusServiceWatcher::serviceRegistered, &app, [holdFull, notifyPerfDisplay] {
         if (full)
             holdFull();
+        notifyPerfDisplay();
     });
     auto deskState = [&] {
-        web.setDesk(profile.tablet || streamService.enabled(), profile.tablet || streamService.connected());
+        // На планшете зритель = включённый экран (или удалённый Mirror): при погашенном экране браузер и
+        // программы стола ставятся на паузу и замораживаются через desk/cgroup.freeze, а не работают 24/7.
+        const bool viewer = (profile.tablet && power.displayOn()) || streamService.connected();
+        web.setDesk(profile.tablet || streamService.enabled(), viewer);
         const bool watched = profile.pixel && streamService.connected() && streamService.desktop();
         apps.setDeskBoost(watched);
         if (watched != full) {
@@ -288,6 +303,7 @@ int main(int argc, char **argv)
             holdFull();
         }
     };
+    QObject::connect(&power, &Power::displayOnChanged, &web, deskState);
     QObject::connect(&streamService, &StreamService::changed, &web, deskState);
     QObject::connect(&web, &WebLink::freezeDesk, &apps, &AppLauncher::freezeDesk);
     QObject::connect(&web, &WebLink::freezeDesk, &android, &AndroidApps::freeze);   // и Android (docs/ANDROID.md)

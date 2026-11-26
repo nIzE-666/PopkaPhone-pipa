@@ -354,7 +354,7 @@ Item {
         return filesPlace.maximized ? Qt.size(windows.width, windows.height) : Qt.size(r.width, r.height)
     }
     function makeFilesSpare() {
-        if (filesSpare || spareIncubator)
+        if (DeskStyle.tablet || filesSpare || spareIncubator)
             return
         const s = spareSize()
         const inc = filesWindow.incubateObject(windows, {
@@ -542,7 +542,7 @@ Item {
     property var warmed: []
     Timer {
         interval: 4000
-        running: true
+        running: !DeskStyle.tablet
         onTriggered: desk.warmed = ["ScreenPage", "WallPage", "LockPage", "MousePage", "MouseMorePage", "TrackpadPage",
                                     "BatteryPage", "HealthPage", "GamepadPage"]
             .map(n => Qt.createComponent("settings/" + n + ".qml", Component.Asynchronous))
@@ -1556,8 +1556,10 @@ Item {
     // снова, и так по кругу (замечено 19 ноября 2026: игра под развёрнутыми «Файлами»). [{pkg, x, y, width, height, z,
     // minimized}] — место в области окон
     property var androidGhosts: []
-    readonly property int androidSeen: {   // 1 — видно (или окон нет: тогда Waydroid спит сам), 0 — свёрнуты, -1 — закрыты
+    readonly property int androidSeen: {   // 1 — видно (или окон нет: тогда Waydroid спит сам), 0 — свёрнуты/экран выкл., -1 — закрыты
         windowsTick
+        if (DeskStyle.tablet && !naomiPower.displayOn && !naomiStream.connected)
+            return 0
         if (Object.keys(androidLaunching).length > 0)
             return 1
         let any = false, covered = false
@@ -2028,10 +2030,12 @@ Item {
         routeSound(false)
         settingsLoaded = true   // настройки мыши и экрана прочитаны — зрителю
         rememberMonitor()
-        spareTimer.start()      // запас «Файлов» — через 1,5 с покоя
+        if (!DeskStyle.tablet)
+            spareTimer.start()      // запас «Файлов» — через 1,5 с покоя
         padCount = naomiGames.gamepads.length   // геймпад, что уже был, — не «появился»
         if (DeskStyle.tablet && naomiKeyboard && naomiKeyboard.visible)
             keyboardBuilt = true
+        naomiDisplay.setNightWarmth(uiSettings.nightFilter)
     }
     Connections {
         target: naomiPhone
@@ -2190,10 +2194,17 @@ Item {
         if (preview && preview.isOpen && preview.source === source)
             preview.show(path, false)
     }
-    Connections {   // зритель ушёл, стол ушёл (приставка без дока) — видео на паузу
+    Connections {   // зритель ушёл, стол ушёл или экран планшета погас — видео на паузу
         target: naomiStream
-        function onConnectedChanged() { if (!naomiStream.connected) naomiPreview.video.pause() }
+        function onConnectedChanged() { if (!naomiStream.connected && (!DeskStyle.tablet || !naomiPower.displayOn)) naomiPreview.video.pause() }
         function onDeskAwayChanged() { if (naomiStream.deskAway) naomiPreview.video.pause() }
+    }
+    Connections {
+        target: naomiPower
+        function onDisplayOnChanged() {
+            if (DeskStyle.tablet && !naomiPower.displayOn && !naomiStream.connected)
+                naomiPreview.video.pause()
+        }
     }
 
     // ---------- меню N, окна звука, Bluetooth и «Интернет», панель ----------
@@ -2542,11 +2553,16 @@ Item {
         dateFormat: uiSettings.dateFormat
     }
 
-    // Ночной тёплый фильтр экрана — мягкий янтарный слой поверх стола, пропускает все касания
+    // Ночной тёплый фильтр экрана: сначала пробуем аппаратную 4×4 матрицу HWC2 (0% нагрузки GPU),
+    // иначе мягкий янтарный QML-слой поверх стола.
+    Connections {
+        target: uiSettings
+        function onNightFilterChanged() { naomiDisplay.setNightWarmth(uiSettings.nightFilter) }
+    }
     Rectangle {
         z: 9999
         anchors.fill: parent
-        visible: uiSettings.nightFilter > 0.01
+        visible: uiSettings.nightFilter > 0.01 && !naomiDisplay.hardwareNightFilter
         color: Qt.rgba(1.0, 0.50, 0.12, Math.min(0.32, uiSettings.nightFilter * 0.45))
     }
 }

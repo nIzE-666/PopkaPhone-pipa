@@ -58,12 +58,13 @@ Column {
             spacing: 6
             Text {
                 width: parent.width
-                text: "CPU: " + (naomiSystemTools.sysInfo.cpuTemp || "—") + " °C  ·  Батарея: "
-                    + (naomiSystemTools.sysInfo.batTemp || "—") + " °C  ·  IP: "
+                text: "CPU: " + (naomiSystemTools.sysInfo.cpuTemp || "—") + " °C  ·  Корпус: "
+                    + (naomiPhone.perf.skinTempC > 0 ? naomiPhone.perf.skinTempC.toFixed(1) : (naomiSystemTools.sysInfo.skinTemp || "—"))
+                    + " °C  ·  Батарея: " + (naomiSystemTools.sysInfo.batTemp || "—") + " °C  ·  IP: "
                     + (naomiSystemTools.sysInfo.ip || "нет")
                 font.family: DeskStyle.mono
                 font.pixelSize: 13
-                color: DeskStyle.text
+                color: naomiPhone.perf.thermalLevel >= 2 ? DeskStyle.bad : DeskStyle.text
                 wrapMode: Text.Wrap
             }
             Text {
@@ -95,30 +96,55 @@ Column {
         color: DeskStyle.amber
     }
 
-    // ---------- Профиль производительности CPU ----------
-    Label { text: "Профиль процессора SM8250" }
+    // ---------- Профиль питания и производительности ----------
+    Label { text: "Профиль питания (CPU · GPU · Экран)" }
     Flow {
         width: page.width
         spacing: 8
         Repeater {
             model: [
-                { id: "powersave", name: "Эконом" },
-                { id: "schedutil", name: "Баланс" },
-                { id: "performance", name: "Максимум" }
+                { id: "eco", name: "Эконом (60 Гц)" },
+                { id: "balanced", name: "Баланс (120→30)" },
+                { id: "performance", name: "Максимум (144)" }
             ]
             NButton {
                 required property var modelData
-                width: 148
+                width: 164
                 centered: true
                 disabled: naomiSystemTools.systemBusy
                 text: modelData.name
-                tone: naomiSystemTools.powerProfile === modelData.id ? "on" : "off"
+                tone: (naomiPhone.perf.profile || naomiSystemTools.powerProfile) === modelData.id ? "on" : "off"
                 onClicked: naomiSystemTools.setPowerProfile(modelData.id)
             }
         }
     }
     Hint {
-        text: "Баланс (schedutil) — оптимум: холодный в простое, мгновенно разгоняется при касаниях."
+        text: "Баланс — холодный простой (300 МГц / 30 Гц), быстрый разгон при касании и мягкая термозащита корпуса (39/42/45 °C)."
+            + (naomiPhone.perf.thermalLevel > 0 ? " Сейчас активна термозащита: уровень " + naomiPhone.perf.thermalLevel + "." : "")
+    }
+
+    // ---------- Сон и сеть ----------
+    Label { text: "Сон и автономность" }
+    Flow {
+        width: page.width
+        spacing: 8
+        NButton {
+            width: 248
+            centered: true
+            text: naomiPhone.perf.stayAwake ? "Режим сервера: ВКЛ" : "Режим сервера: ВЫКЛ"
+            tone: naomiPhone.perf.stayAwake ? "on" : "off"
+            onClicked: naomiSystemTools.setStayAwake(!naomiPhone.perf.stayAwake)
+        }
+        NButton {
+            width: 230
+            centered: true
+            text: naomiPhone.perf.deepSuspend ? "Глубокий сон (deep): ВКЛ" : "Глубокий сон (deep): ВЫКЛ"
+            tone: naomiPhone.perf.deepSuspend ? "on" : "off"
+            onClicked: naomiSystemTools.setDeepSuspend(!naomiPhone.perf.deepSuspend)
+        }
+    }
+    Hint {
+        text: "При выключенном «Режиме сервера» и активном «Глубоком сне» планшет от батареи уходит в mem-сон через 15 с после гашения экрана (на зарядке и по SSH не засыпает)."
     }
 
     // ---------- Службы планшета ----------

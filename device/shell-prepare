@@ -84,36 +84,60 @@ pipa_disk_memory() {
 pipa_post_boot() {
     w() { [ -w "$1" ] && printf '%s' "$2" > "$1" 2>/dev/null || true; }
 
-    # Включить энергосберегающие C-states ядер и выключить загрузочный sched_boost
+    # Включить энергосберегающие C-states ядер, WALT-тюнинг (init.qcom.post_boot.sh) и выключить sched_boost
     w /sys/module/lpm_levels/parameters/sleep_disabled N
     w /proc/sys/kernel/sched_boost 0
+    w /proc/sys/kernel/sched_group_downmigrate 85
+    w /proc/sys/kernel/sched_walt_rotate_big_tasks 1
+    w /proc/sys/kernel/sched_coloc_downmigrate_ns 400000000
+    w /proc/sys/kernel/sched_conservative_pl 1
 
-    # Кластеры SM8250 (policy0: 4x Silver, policy4: 3x Gold, policy7: 1x Prime) -> schedutil
-    for p in policy0 policy4 policy7; do
-        dir="/sys/devices/system/cpu/cpufreq/$p"
+    # Кластеры CPU (автообнаружение policy*): на ядре Halium 4.19 (без uclamp) schedutil залипает на
+    # 100% MAX-частоте из-за RT threaded IRQ, поэтому ставим настроенный ondemand + аппаратный min_freq.
+    for dir in /sys/devices/system/cpu/cpufreq/policy*; do
         [ -d "$dir" ] || continue
-        w "$dir/scaling_governor" schedutil
-        w "$dir/schedutil/up_rate_limit_us" 0
-        w "$dir/schedutil/down_rate_limit_us" 0
-        w "$dir/schedutil/pl" 1
+        if grep -qw ondemand "$dir/scaling_available_governors" 2>/dev/null; then
+            w "$dir/scaling_governor" ondemand
+            w "$dir/ondemand/sampling_rate" 20000
+            w "$dir/ondemand/up_threshold" 70
+            w "$dir/ondemand/io_is_busy" 1
+            w "$dir/ondemand/sampling_down_factor" 2
+        else
+            w "$dir/scaling_governor" schedutil
+            w "$dir/schedutil/up_rate_limit_us" 500
+            w "$dir/schedutil/down_rate_limit_us" 20000
+            w "$dir/schedutil/pl" 0
+        fi
+        if [ -r "$dir/cpuinfo_min_freq" ]; then
+            w "$dir/scaling_min_freq" "$(cat "$dir/cpuinfo_min_freq" 2>/dev/null)"
+        fi
     done
-    w /sys/devices/system/cpu/cpufreq/policy0/scaling_min_freq 691200
-    w /sys/devices/system/cpu/cpufreq/policy0/schedutil/hispeed_freq 1248000
-    w /sys/devices/system/cpu/cpufreq/policy4/schedutil/hispeed_freq 1574400
-    w /sys/devices/system/cpu/cpufreq/policy7/schedutil/hispeed_freq 1632000
 
-    # Мгновенный отклик на касание и кнопку питания (из init.pipa.rc)
-    w /sys/devices/system/cpu/cpu_boost/input_boost_freq "0:1344000"
-    w /sys/devices/system/cpu/cpu_boost/input_boost_ms 120
-    w /sys/devices/system/cpu/cpu_boost/powerkey_input_boost_freq "0:1804800 1:0 2:0 3:0 4:2419200 5:0 6:0 7:3187200"
-    w /sys/devices/system/cpu/cpu_boost/powerkey_input_boost_ms 400
+    # Лёгкий отклик на касание и кнопку питания (без перегрева на 3.19 ГГц)
+    w /sys/devices/system/cpu/cpu_boost/input_boost_freq "0:1171200"
+    w /sys/devices/system/cpu/cpu_boost/input_boost_ms 60
+    w /sys/devices/system/cpu/cpu_boost/powerkey_input_boost_freq "0:1516800 1:0 2:0 3:0 4:1862400 5:0 6:0 7:0"
+    w /sys/devices/system/cpu/cpu_boost/powerkey_input_boost_ms 250
 
-    # Bus DCVS: LLCC, DDR (LPDDR5), NPU (из init.qcom.post_boot.sh)
+    # UFS 3.1 PM (init.qcom.rc выключает их на early-init и включает по sys.boot_completed=1, который в Halium не приходит)
+    for ufs in /sys/bus/platform/devices/*.ufshc; do
+        [ -d "$ufs" ] || continue
+        w "$ufs/clkscale_enable" 1
+        w "$ufs/auto_hibern8" 5000
+        w "$ufs/clkgate_enable" 1
+    done
+
+    # Adreno 650 GPU: разрешить межскадровый сон GMU (force_no_nap=0)
+    w /sys/class/kgsl/kgsl-3d0/force_no_nap 0
+    w /sys/class/kgsl/kgsl-3d0/idle_timer 60
+
+    # Bus DCVS: LLCC, DDR (LPDDR5), NPU (из init.qcom.post_boot.sh, включая стоковые потолки max_freq)
     soc=/sys/devices/platform/soc
     if [ -d "$soc" ]; then
         for cpubw in $soc/*cpu-cpu-llcc-bw/devfreq/*cpu-cpu-llcc-bw; do
             [ -d "$cpubw" ] || continue
             w "$cpubw/governor" bw_hwmon
+            w "$cpubw/max_freq" 14236
             w "$cpubw/bw_hwmon/mbps_zones" "4577 7110 9155 12298 14236 15258"
             w "$cpubw/bw_hwmon/sample_ms" 4
             w "$cpubw/bw_hwmon/io_percent" 50
@@ -128,6 +152,7 @@ pipa_post_boot() {
         for llccbw in $soc/*cpu-llcc-ddr-bw/devfreq/*cpu-llcc-ddr-bw; do
             [ -d "$llccbw" ] || continue
             w "$llccbw/governor" bw_hwmon
+            w "$llccbw/max_freq" 6881
             w "$llccbw/bw_hwmon/mbps_zones" "1720 2086 2929 3879 5931 6881 7980 10437"
             w "$llccbw/bw_hwmon/sample_ms" 4
             w "$llccbw/bw_hwmon/io_percent" 80
@@ -172,22 +197,22 @@ pipa_post_boot() {
             w /sys/devices/virtual/npu/msm_npu/pwr 0
         done
 
-        # MemLat / L3 / CDSP scaling (из init.qti.dcvs.sh)
+        # MemLat / L3 / CDSP scaling (20 мс вместо 8 мс режет лишние пробуждения memlat_wq в покое)
         for memlat in $soc/*qcom,devfreq-l3/*cpu*-lat/devfreq/*cpu*-lat $soc/*cpu*-lat/devfreq/*cpu*-lat; do
             [ -d "$memlat" ] || continue
             w "$memlat/governor" mem_latency
-            w "$memlat/polling_interval" 8
+            w "$memlat/polling_interval" 20
             w "$memlat/mem_latency/ratio_ceil" 400
         done
         for latfloor in $soc/*cpu-ddr-latfloor*/devfreq/*cpu-ddr-latfloor*; do
             [ -d "$latfloor" ] || continue
             w "$latfloor/governor" compute
-            w "$latfloor/polling_interval" 8
+            w "$latfloor/polling_interval" 20
         done
         for qoslat in $soc/*qoslat/devfreq/*qoslat; do
             [ -d "$qoslat" ] || continue
             w "$qoslat/governor" mem_latency
-            w "$qoslat/polling_interval" 10
+            w "$qoslat/polling_interval" 20
             w "$qoslat/mem_latency/ratio_ceil" 50
         done
         for l3cdsp in $soc/*qcom,devfreq-l3/*cdsp-l3-lat/devfreq/*cdsp-l3-lat; do
@@ -203,6 +228,34 @@ pipa_post_boot() {
             w "$l3prime/mem_latency/ratio_ceil" 20000
         done
     fi
+
+    # Подключаем schedtune для изоляции задач стола на планшете
+    STUNE=/dev/stune
+    if grep -q '^schedtune' /proc/cgroups 2>/dev/null; then
+        mkdir -p "$STUNE"
+        mountpoint -q "$STUNE" || mount -t cgroup -o schedtune stune "$STUNE" 2>/dev/null || true
+        if mkdir -p "$STUNE/desk" 2>/dev/null; then
+            w "$STUNE/desk/schedtune.boost" 0
+            w "$STUNE/desk/schedtune.prefer_idle" 1
+            chown phablet:phablet "$STUNE/desk/cgroup.procs" "$STUNE/desk/tasks" "$STUNE/desk/schedtune.boost" 2>/dev/null || true
+        fi
+    fi
+
+    # Останавливаем неиспользуемые Android HAL-демоны в Halium-контейнере (экономит ~100+ с CPU, ОЗУ и такты NPU/WFD)
+    for svc in \
+        feature_enabler_client \
+        wfdhdcphalservice \
+        wfdvndservice \
+        wifidisplayhalservice \
+        traced \
+        traced_probes \
+        statsd \
+        vendor.vppservice \
+        neuralnetworks_hal_service \
+        vendor.ipacm
+    do
+        [ "$(getprop "init.svc.$svc" 2>/dev/null)" = running ] && setprop ctl.stop "$svc" 2>/dev/null || true
+    done
 
     # Развести IRQ GPU (KGSL -> CPU1) и дисплея (MDSS/DRM -> CPU2) (из init.aospa.perf.sh)
     for pair in kgsl_3d0_irq:1 kgsl-3d0:1 msm_drm:2 MDSS:2; do

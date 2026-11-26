@@ -28,6 +28,7 @@ class DisplayStats : public QObject
     Q_PROPERTY(QSize panelSize READ panelSize CONSTANT)
     Q_PROPERTY(int sceneRotation READ sceneRotation WRITE setSceneRotation NOTIFY sceneRotationChanged)
     Q_PROPERTY(bool autoRotate READ autoRotate WRITE setAutoRotate NOTIFY autoRotateChanged)
+    Q_PROPERTY(bool hardwareNightFilter READ hardwareNightFilter NOTIFY hardwareNightFilterChanged)
 
 public:
     explicit DisplayStats(QObject *parent = nullptr);
@@ -44,6 +45,7 @@ public:
     QSize panelSize() const;
     int sceneRotation() const { return m_sceneRotation; }
     bool autoRotate() const { return m_autoRotate; }
+    bool hardwareNightFilter() const { return m_hardwareNightFilter; }
     QVariantList refreshRates() const;
 
     void setSceneRotation(int rotation);
@@ -51,6 +53,7 @@ public:
     Q_INVOKABLE void chooseOrientation(int rotation);
     Q_INVOKABLE void toggleOrientation();
     Q_INVOKABLE bool setRefresh(int hz);
+    Q_INVOKABLE bool setNightWarmth(qreal warmth);
     // ширина кадра (1080 — во всю панель, 720 — 720 × 1560): запомнить и перезапустить оболочку
     Q_INVOKABLE void setRenderWidth(int width);
     void setActive(bool on);   // экран выключен — не опрашивать (иначе интерфейс перерисовывается)
@@ -62,13 +65,16 @@ signals:
     void changed();
     void sceneRotationChanged();
     void autoRotateChanged();
+    void hardwareNightFilterChanged();
     void restartRequested();
 
 private:
     int m_sceneRotation = 0;
     bool m_autoRotate = false;
+    bool m_hardwareNightFilter = false;
     NaomiFrameSnapshotFn m_snapshot = nullptr;
     NaomiSetRefreshFn m_setRefresh = nullptr;
+    NaomiSetColorWarmthFn m_setColorWarmth = nullptr;
     NaomiFrameSnapshot m_s{};
     QTimer m_timer;
 };

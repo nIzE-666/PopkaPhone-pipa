@@ -154,6 +154,8 @@ PhoneClient::PhoneClient()
     , m_bluetooth(new BusMirror("Bluetooth", {{"powered", false}, {"discovering", false}, {"devices", QVariantList()}},
                                 {"Failed", "Pairing"}, this))
     , m_sensors(new BusMirror("Sensors", {{"orientation", "unknown"}, {"light", -1}, {"motion", 0u}}, {}, this))
+    , m_perf(new BusMirror("Perf", {{"desk", false}, {"profile", "balanced"}, {"stayAwake", false},
+                                    {"deepSuspend", false}, {"thermalLevel", 0}, {"skinTempC", 0.0}}, {}, this))
     , m_system(new BusMirror("System", {}, {}, this))
 {
     auto *watcher = new QDBusServiceWatcher(SERVICE, bus(), QDBusServiceWatcher::WatchForOwnerChange, this);

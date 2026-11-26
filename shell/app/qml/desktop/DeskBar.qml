@@ -325,11 +325,18 @@ Item {
     property bool clockSeconds: false
     property int dateFormat: 1          // 0 — скрыть, 1 — ВТ 24 НОЯ, 2 — 24.11, 3 — TUE 24
     property date now: new Date()
-    Timer {   // минута (или секунда, если включены секунды) сменилась — новое время
-        running: true
+    Timer {   // минута (или секунда, если включены секунды) сменилась — новое время; при выключенном экране не тикаем!
+        running: naomiPower.displayOn
         repeat: true
         interval: bar.clockSeconds ? 1000 : (60 - bar.now.getSeconds()) * 1000 + 50
         onTriggered: bar.now = new Date()
+    }
+    Connections {
+        target: naomiPower
+        function onDisplayOnChanged() {
+            if (naomiPower.displayOn)
+                bar.now = new Date()
+        }
     }
     readonly property string timeText: {
         const h = now.getHours(), m = now.getMinutes(), s = now.getSeconds()

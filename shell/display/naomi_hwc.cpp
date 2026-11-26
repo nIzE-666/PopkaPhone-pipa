@@ -50,6 +50,7 @@ using SetActiveConfigFn = int32_t (*)(void *display, uint32_t config, const Vsyn
                                       VsyncTimeline *);
 using GetVsyncPeriodFn = int32_t (*)(const void *display, int64_t *period);
 using GetAttributeFn = int32_t (*)(void *display, uint32_t config, int32_t attribute);
+using SetColorTransformFn = int32_t (*)(void *display, const float *matrix16);
 
 const char kSetConfigSymbol[] =
     "_ZN7android4HWC24impl7Display30setActiveConfigWithConstraintsEjRKNS_8hardware8graphics8"
@@ -57,6 +58,8 @@ const char kSetConfigSymbol[] =
 const char kVsyncPeriodSymbol[] = "_ZNK7android4HWC24impl7Display21getDisplayVsyncPeriodEPl";
 const char kGetAttributeSymbol[] =
     "_ZN7android4HWC24impl7Display12getAttributeEjNS_8hardware8graphics8composer4V2_415IComposerClient9AttributeE";
+const char kSetColorTransformSymbol[] =
+    "_ZN7android4HWC24impl7Display17setColorTransformERKNS_7details6TMat44IfEE";
 
 void *androidDisplay(hwc2_compat_display *display)
 {
@@ -97,6 +100,12 @@ bool setDisplayMode(int mode)
     return self && self->setDisplayMode(mode);
 }
 
+bool setColorWarmth(double warmth)
+{
+    auto *self = NaomiHwcIntegration::instance();
+    return self && self->setColorWarmth(warmth);
+}
+
 const char *modeName(int mode)
 {
     return mode == NaomiDisplayOn ? "включён" : mode == NaomiDisplayDoze ? "в малом питании" : "выключен";
@@ -130,9 +139,14 @@ public:
 protected:
     int setUsage(uint64_t usage) override
     {
-        // QTI gralloc: разрешение чтения CPU оставляет цветовой буфер линейным (без UBWC).
-        return HWComposerNativeWindow::setUsage(usage | GRALLOC_USAGE_HW_COMPOSER | GRALLOC_USAGE_HW_RENDER
-                                               | GRALLOC_USAGE_SW_READ_RARELY);
+        // UBWC-сжатие фреймбуфера (экономит 35–55% трафика LPDDR5 на 2880×1800@120Гц).
+        // NAOMI_PIPA_UBWC=0 откатывает на линейный буфер (GRALLOC_USAGE_SW_READ_RARELY).
+        const auto &profile = DeviceProfile::current();
+        const bool ubwc = profile.displayUbwc && qgetenv("NAOMI_PIPA_UBWC") != "0";
+        uint64_t flags = usage | GRALLOC_USAGE_HW_COMPOSER | GRALLOC_USAGE_HW_RENDER;
+        if (!ubwc)
+            flags |= GRALLOC_USAGE_SW_READ_RARELY;
+        return HWComposerNativeWindow::setUsage(flags);
     }
 
     int setBufferCount(int count) override { return HWComposerNativeWindow::setBufferCount(std::max(3, count)); }
@@ -205,6 +219,7 @@ void NaomiHwcIntegration::platformInit()
     void *lib = android_dlopen("libhwc2_compat_layer.so", RTLD_NOW);
     m_setConfigSym = lib ? android_dlsym(lib, kSetConfigSymbol) : nullptr;
     m_vsyncPeriodSym = lib && profile.tablet ? android_dlsym(lib, kVsyncPeriodSymbol) : nullptr;
+    m_setColorTransformSym = lib ? android_dlsym(lib, kSetColorTransformSymbol) : nullptr;
     if (!m_setConfigSym)
         qCWarning(lcNaomiHwc, "нет setActiveConfigWithConstraints — частота останется как есть");
 
@@ -254,9 +269,17 @@ void NaomiHwcIntegration::platformInit()
     if (requestRefresh(initialHz))
         m_refreshHz = initialHz;  // оценка интервала для Qt до первых кадров, счётчик использует текущую частоту
     m_defaultHz = qRound(m_refreshHz.load());
-    // частота покоя: на планшете — 60 Гц (NAOMI_IDLE_HZ — другая, 0 — не снижать); режим должен быть у панели
-    const int idleHz = qEnvironmentVariableIsSet("NAOMI_IDLE_HZ") ? qEnvironmentVariableIntValue("NAOMI_IDLE_HZ")
-                     : profile.tablet ? 60 : 0;
+    // частота покоя: берём из профиля устройства (на pipa — 30 Гц с откатом на 48/60 Гц; NAOMI_IDLE_HZ=0 — выкл.)
+    int idleHz = qEnvironmentVariableIsSet("NAOMI_IDLE_HZ") ? qEnvironmentVariableIntValue("NAOMI_IDLE_HZ")
+               : profile.idleRefreshHz;
+    if (idleHz > 0 && configForHz(idleHz) < 0) {
+        for (int fallback : {30, 48, 50, 60}) {
+            if (configForHz(fallback) >= 0) {
+                idleHz = fallback;
+                break;
+            }
+        }
+    }
     m_idleHz = idleHz > 0 && configForHz(idleHz) >= 0 && m_setConfigSym ? idleHz : 0;
     // панель при старте — на частоте покоя: прошлая оболочка ушла в покое (режим composer помнит). Рабочая тогда —
     // высшая до 120 Гц (144 — только выбором в настройках)
@@ -464,7 +487,7 @@ void NaomiHwcIntegration::driveRefresh()
     // экран ничем не занят или оболочка только стартует. По ним не судить — ждать сплошных кадров (любая анимация);
     // иначе после перезагрузки выходило «не включилась: 33 мс» при панели на 90 Гц
     const bool tablet = DeviceProfile::current().tablet;
-    if (panelMs > (tablet ? 36 : 25))
+    if (panelMs > (tablet ? 38 : 25))
         return;
     const double wantedMs = 1000.0 / m_targetHz;
     if (std::fabs(panelMs - wantedMs) < (tablet ? 0.4 : 1.0)) {
@@ -579,7 +602,20 @@ void NaomiHwcIntegration::presentCallback(void *self, ANativeWindow *, ANativeWi
 // libhybris ещё ждёт, пока панель отпустит буфер (до vsync), и поток отрисовки до того занят.
 void NaomiHwcIntegration::presentBuffer(QPlatformSurface *)
 {
-    QMetaObject::invokeMethod(&m_gui, [this] { frameSwapped(); }, Qt::QueuedConnection);
+    QMetaObject::invokeMethod(&m_gui, [this] {
+        frameSwapped();
+        if (m_idleHz > 0 && m_mode == NaomiDisplayOn) {
+            if (!m_idleTimer) {
+                m_idleTimer = new QTimer(&m_gui);
+                m_idleTimer->setSingleShot(true);
+                QObject::connect(m_idleTimer, &QTimer::timeout, &m_gui, [this] {
+                    if (m_mode == NaomiDisplayOn && m_idleHz > 0 && m_targetHz != m_idleHz)
+                        requestFullFrame();
+                });
+            }
+            m_idleTimer->start(2200);
+        }
+    }, Qt::QueuedConnection);
 }
 
 void NaomiHwcIntegration::requestFullFrame()
@@ -662,10 +698,36 @@ bool NaomiHwcIntegration::setDisplayMode(int mode)
     }
     m_mode = mode;
     qCInfo(lcNaomiHwc, "дисплей %s", modeName(mode));
+    if (mode != NaomiDisplayOn && m_idleTimer)
+        QMetaObject::invokeMethod(&m_gui, [this] { if (m_idleTimer) m_idleTimer->stop(); }, Qt::QueuedConnection);
     if (mode == NaomiDisplayOn) {  // панель может вернуться на 60 Гц — заново, с проверкой замером
         // выбранная частота, а не текущая: экран гас в покое — m_targetHz там частота покоя
         const int user = m_userHz.load();
         m_requestHz = user ? user : m_defaultHz ? m_defaultHz : m_targetHz ? m_targetHz : int(m_refreshHz.load());
+    }
+    return true;
+}
+
+bool NaomiHwcIntegration::setColorWarmth(double warmth)
+{
+    if (!m_setColorTransformSym || !m_display)
+        return false;
+    const float w = float(std::clamp(warmth, 0.0, 1.0));
+    // Аппаратная 4×4 матрица SDM (0% нагрузки GPU вместо полноэкранного QML-оверлея)
+    const float g = 1.0f - 0.28f * w;
+    const float b = 1.0f - 0.62f * w;
+    const float mat[16] = {
+        1.0f, 0.0f, 0.0f, 0.0f,
+        0.0f,    g, 0.0f, 0.0f,
+        0.0f, 0.0f,    b, 0.0f,
+        0.0f, 0.0f, 0.0f, 1.0f,
+    };
+    std::lock_guard<std::mutex> lock(m_hwcMutex);
+    const int32_t err = reinterpret_cast<SetColorTransformFn>(m_setColorTransformSym)(
+        androidDisplay(m_display), mat);
+    if (err != 0) {
+        qCWarning(lcNaomiHwc, "setColorTransform(%.2f): ошибка %d", warmth, err);
+        return false;
     }
     return true;
 }
@@ -835,6 +897,8 @@ QFunctionPointer NaomiHwcIntegration::platformFunction(const QByteArray &functio
         return QFunctionPointer(&::refreshRates);
     if (function == kNaomiSetDisplayMode)
         return QFunctionPointer(&::setDisplayMode);
+    if (function == kNaomiSetColorWarmth && m_setColorTransformSym)
+        return QFunctionPointer(&::setColorWarmth);
     return nullptr;
 }
 

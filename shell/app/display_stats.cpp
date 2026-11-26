@@ -26,6 +26,8 @@ DisplayStats::DisplayStats(QObject *parent)
           QGuiApplication::platformFunction(kNaomiFrameSnapshot)))
     , m_setRefresh(reinterpret_cast<NaomiSetRefreshFn>(
           QGuiApplication::platformFunction(kNaomiSetRefresh)))
+    , m_setColorWarmth(reinterpret_cast<NaomiSetColorWarmthFn>(
+          QGuiApplication::platformFunction(kNaomiSetColorWarmth)))
 {
     const auto &profile = DeviceProfile::current();
     if (profile.tablet) {
@@ -44,7 +46,7 @@ DisplayStats::DisplayStats(QObject *parent)
         m_snapshot(&m_s);
         emit changed();
     });
-    m_timer.start(250);
+    m_timer.start(profile.tablet ? 1000 : 250);
 }
 
 QSize DisplayStats::renderSize() const
@@ -124,7 +126,7 @@ void DisplayStats::setActive(bool on)
     if (!m_snapshot)
         return;
     if (on)
-        m_timer.start(250);
+        m_timer.start(DeviceProfile::current().tablet ? 1000 : 250);
     else
         m_timer.stop();
 }
@@ -136,4 +138,18 @@ bool DisplayStats::setRefresh(int hz)
     if (auto *window = qobject_cast<QQuickWindow *>(QGuiApplication::focusWindow()))
         window->update();
     return true;
+}
+
+bool DisplayStats::setNightWarmth(qreal warmth)
+{
+    const bool ok = m_setColorWarmth && m_setColorWarmth(double(warmth));
+    if (ok != m_hardwareNightFilter) {
+        m_hardwareNightFilter = ok;
+        emit hardwareNightFilterChanged();
+    }
+    if (ok) {
+        if (auto *window = qobject_cast<QQuickWindow *>(QGuiApplication::focusWindow()))
+            window->update();
+    }
+    return ok;
 }
