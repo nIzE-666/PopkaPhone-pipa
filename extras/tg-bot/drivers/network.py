@@ -4,8 +4,10 @@ from __future__ import annotations
 
 import asyncio
 import ipaddress
+import os
 import re
-from typing import Any, Dict, List, Optional, Sequence
+from pathlib import Path
+from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 try:
     from ..config import BotConfig
@@ -133,10 +135,40 @@ class NetworkDriver:
         except OSError:
             return 1, ""
 
+    def _wifi_candidates(self) -> List[str]:
+        candidates: List[str] = []
+        net_dir = Path("/sys/class/net")
+        if net_dir.is_dir():
+            found: List[Tuple[int, str]] = []
+            for p in sorted(net_dir.iterdir()):
+                if p.name.startswith("p2p-"):
+                    continue
+                if (p / "wireless").is_dir():
+                    state = ""
+                    try:
+                        state = (p / "operstate").read_text(encoding="utf-8", errors="replace").strip()
+                    except OSError:
+                        pass
+                    found.append((0 if state == "up" else 1, p.name))
+            found.sort()
+            candidates.extend(name for _, name in found)
+        for fallback in (self.config.network.wifi_interface, "wlan0", "wlp1s0"):
+            if fallback and fallback not in candidates:
+                candidates.append(fallback)
+        return candidates
+
     async def get_wifi_info(self) -> Dict[str, Any]:
-        iface = self.config.network.wifi_interface
-        rc_iw, out_iw = await self._run(["iw", "dev", iface, "link"], timeout=4.0)
-        info = parse_iw_link(out_iw) if rc_iw == 0 else {"ssid": None, "signal_dbm": None, "tx_bitrate": None}
+        candidates = self._wifi_candidates()
+        iface = candidates[0]
+        info: Dict[str, Any] = {"ssid": None, "signal_dbm": None, "tx_bitrate": None}
+        for cand in candidates:
+            rc_iw, out_iw = await self._run(["iw", "dev", cand, "link"], timeout=4.0)
+            if rc_iw == 0:
+                parsed = parse_iw_link(out_iw)
+                if parsed.get("ssid"):
+                    iface = cand
+                    info = parsed
+                    break
         rc_ip, out_ip = await self._run(["ip", "-4", "-o", "addr", "show", "dev", iface], timeout=4.0)
         ip_addr = None
         if rc_ip == 0:

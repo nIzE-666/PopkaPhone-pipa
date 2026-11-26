@@ -1,5 +1,30 @@
 # Changelog
 
+## v0.3.0-pipa — 2026-11-26
+
+Deep power, thermal, display, and standby optimization release — verified live on Xiaomi Pad 6 (`pipa`, Snapdragon 870 / `SM8250`) and architected with portable device capabilities & topology auto-discovery for other Halium 13 / ARM64 Linux tablets.
+
+### Kernel, SoC, Storage, GPU & Radio Efficiency (`device/shell-prepare`, `device/install-shell.sh`, `device/zz-pipa-security.conf`)
+- **Fixed 100% MAX CPU pin on Halium 4.19 (`ondemand` vs `schedutil`):** on 4.19 QTI WALT kernels without `CONFIG_UCLAMP_TASK`, `schedutil` stayed permanently pegged at `1804.8 / 2419.2 / 3187.2 MHz` due to RT threaded IRQs. Auto-discovered `policy*` clusters now run tuned `ondemand` (`sampling_rate=20000`, `up_threshold=70`, `io_is_busy=1`, `sampling_down_factor=2`, hardware `cpuinfo_min_freq`) with `schedutil` fallback — verified live dropping idle frequencies to **`300 / 710.4 / 844.8 MHz`** with instant burst ramp-up.
+- **UFS 3.1, GPU & Memory Bus Power Management:** enabled `auto_hibern8=5000` + `clkgate_enable=1` on `*.ufshc` (verified live `ufshc` entering `suspended` during idle), set Adreno 650 `kgsl-3d0/force_no_nap=0` (verified idling at **`150 MHz`**), restored stock SM8250 `bw_hwmon` caps (`14236` / `6881`), and tuned `mem_latency` (`polling_interval=20`) + WALT downmigration.
+- **Eliminated Background Daemon & Radio Waste:** stopped 10 unused Android LXC daemons (`feature_enabler_client`, `wfd*`, `traced*`, `statsd`, `vendor.vppservice`, `neuralnetworks_hal_service`, `vendor.ipacm`), masked `nfcd.service` & `ofono.service` on Wi-Fi-only tablets, marked unused `wlan1` unmanaged in NetworkManager (`90-naomi-wlan1.conf`), and removed the conflicting `wifi.powersave=2` override in `zz-pipa-security.conf` (enabling `cnss` QCA6390 PCIe runtime suspend with Wake-on-Wireless).
+
+### Display Pipeline, Compositor & Standby Breakthrough (`shell/display/`, `shell/app/`, `shell/apps/web/`)
+- **True `HWC2_POWER_MODE_OFF` on Screen-Off (`shell/app/power.cpp`, `shell/device_profile.*`):** re-enabled real HWC2 panel power-off on `pipa` (overrideable via `NAOMI_DISPLAY_POWER_OFF=0`), cleanly turning off `card0-DSI-1` DPMS, shutting down `disp_cc_pll0`, and putting `ae00000.qcom,mdss_mdp` into **`suspended`** (previously 99.99% active while screen-off) with clean wake-resume verified live.
+- **30 Hz Idle Refresh + UBWC + Hardware Night Filter CTM (`shell/display/naomi_hwc.cpp`, `shell/app/display_stats.cpp`):** lowered default tablet idle refresh to **`30 Hz`** with a dedicated `2.2 s` single-shot idle timer (`m_idleTimer`), enabled Qualcomm UBWC gralloc compression (`NAOMI_PIPA_UBWC`, `usage 0x10001a00`, visually verified pixel-perfect), and wired hardware `HWC2::Display::setColorTransform` 4×4 CTM for zero-GPU-overhead Night Filter (with QML fallback).
+- **Fixed Screen-Off Cgroup Freezer & Background Loops (`shell/app/main.cpp`, `shell/app/qml/desktop/`):** fixed `viewer = (profile.tablet && power.displayOn()) || streamService.connected()` so desktop apps actually freeze when the tablet screen turns off; stopped `DeskBar` clock redraws, `SystemTools` polling, `PreviewVideo`, and `Waydroid` frame loops on screen-off; disabled hidden spare `FilesWindow`, 9-page Settings pre-warm, and permanent hidden `naomi-web` spare Chromium renderer (`NAOMI_WEB_NO_SPARE=1`) on tablets (reducing `naomi-shell` RSS to ~228 MB).
+
+### Portable Tablet Profiles, Skin Thermal Governor & Deep Suspend (`shell/naomid/perf.*`, `SystemPage.qml`)
+- **Multi-Subsystem Power Profiles (`Эконом 60 Гц` / `Баланс 120→30 Гц` / `Максимум 144 Гц`):** `naomid` (`org.naomi.Phone.Perf`) auto-discovers CPU clusters and `kgsl-3d0` levels and coordinates CPU frequency ceilings, `ondemand` thresholds, `input_boost`, GPU `max_pwrlevel`, and HWC2 refresh rate together.
+- **Skin Thermal Governor (`quiet_therm` / `skin-therm`):** 5-second thermal monitor with 2 °C hysteresis (`39 / 42 / 45 °C` thresholds) smoothly caps Prime/Big/GPU clocks before the tablet body gets uncomfortably warm.
+- **Dynamic `wake_lock` & Opt-In Deep Sleep (`mem`):** removed permanent kernel `wake_lock` from `naomi-pipa-awake.service` (keeping only `handle-power-key` inhibit) and handed dynamic wake-lock + opt-in battery `deep` (`mem`) suspend to `naomid`, with **«Режим сервера (не усыплять сеть)»** and **«Глубокий сон (deep)»** toggles in Settings → Система (automatically bypassed when plugged into USB/AC or during active SSH sessions).
+- **Reduced `naomid` Wakeups (`shell/naomid/charge.cpp`, `shell/naomid/cell.cpp`):** eliminated the 30-second `iw` process fork storm in `charge.cpp` and short-circuited cellular polling when `!profile.hasCellular`.
+
+### Wi-Fi Interface Auto-Detection Fix (`device/pipa-mode`, `device/95-pipa-mode`, `extras/tg-bot/`)
+- Auto-detect active wireless interfaces (`wlan*` / `wlp*`, skipping `p2p-*`) and include `/usr/sbin` in `PATH` so `pipa-mode` firewall rules, NetworkManager dispatcher, and `tg-bot` work seamlessly whether Halium enumerates Wi-Fi as `wlan0` or `wlp1s0`.
+
+---
+
 ## v0.2.0-pipa — 2026-11-25
 
 System hardening, travel security mode, DNS-leak-free TUN VPN, and compositor/desktop fixes verified on Xiaomi Pad 6 (`pipa`).

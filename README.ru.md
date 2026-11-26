@@ -20,11 +20,11 @@
 
 ### 1. Система, ядро SM8250 и автономность (`device/shell-prepare`, `shell/naomid/`)
 - **Dual-boot без потери Android:** Ubuntu Touch 26.04 LTS (Halium 13) работает на слоте `_b` (ext4-контейнер на `/data`), Android остаётся нетронутым на слоте `_a`. Переключение систем в 1 тап — из меню `N` («Перезагрузить в One UI») и через Android-приложение/плитку `PopkaPhone-Boot-Switch` (`tablet/boot-switch/`).
-- **Тюнинг Snapdragon 870 (`SM8250`):** губернатор `schedutil` + `input_boost` (`0:1344000`, 120 мс), разблокированные C-states (`lpm_levels`), динамические шины L3/LLCC/DDR/NPU (`mem_latency`/`bw_hwmon`/`cdspl3`), разнесённые IRQ (`kgsl` / `msm_drm`). Температура в простое ~39–40 °C.
-- **Память, звук и хранилище:** 4 ГБ ZRAM (`zstd`, 8 потоков, `swappiness=100`, `page-cluster=0`), `read_ahead_kb=128`, PulseAudio 48 kHz (`avoid-resampling=yes`).
-- **Адаптивная частота экрана:** 120 Гц в работе / 60 Гц в покое (гистерезис 2 кадра), выбор 30/48/50/60/90/120/144 Гц.
+- **Тюнинг Snapdragon 870 (`SM8250`) и автономность (`v0.3.0-pipa`):** настроенный `ondemand` с автообнаружением кластеров (`300 / 710 / 845 МГц` в простое вместо залипания `schedutil` на 100% MAX), UFS 3.1 `auto_hibern8` + `clkgate`, GPU `force_no_nap=0` (150 МГц в простое), штатные лимиты шин `bw_hwmon`, остановка 10 лишних LXC-демонов и `nfcd`/`ofono`, мягкая термозащита корпуса `quiet_therm` (`39 / 42 / 45 °C`) и профили `Эконом (60 Гц) / Баланс (120→30 Гц) / Максимум (144 Гц)`.
+- **Память, звук и хранилище:** 4 ГБ ZRAM (`zstd`, `page-cluster=0`, `swappiness=80`), `read_ahead_kb=128`, PulseAudio 48 kHz (`avoid-resampling=yes`), отключены скрытые «запасные» рендереры (`NAOMI_WEB_NO_SPARE=1`).
+- **Адаптивный дисплей и настоящий сон:** `120 → 30 Гц` в простое (таймер 2,2 с), аппаратное сжатие буферов UBWC (`NAOMI_PIPA_UBWC`), аппаратная матрица ночного фильтра HWC2 CTM, реальное отключение дисплея `HWC2_POWER_MODE_OFF` (`mdss_mdp` уходит в `suspended`), исправленная заморозка приложений `cgroup.freeze` при гашении экрана, динамический `wake_lock` и опциональный глубокий сон (`deep`/`mem`) в Настройках.
 - **Защита батареи:** аппаратное ограничение заряда на 80% (`night_charging`).
-- **Режим безопасности «Дома / Вне дома / Авто» и VPN без утечки DNS (`device/pipa-mode`, `device/pipa-vpn`):** фаервол `iptables`/`ip6tables` (`PIPA_IN`/`PIPA_IN6`) до старта сети, автопереключение по SSID (`95-pipa-mode`), рандомизация MAC при сканировании Wi-Fi (`zz-pipa-security.conf`), системный TUN VPN с DoH (`127.0.0.1:1053`) и обходом для NTP (UDP/123).
+- **Режим безопасности «Дома / Вне дома / Авто» и VPN без утечки DNS (`device/pipa-mode`, `device/pipa-vpn`):** фаервол `iptables`/`ip6tables` (`PIPA_IN`/`PIPA_IN6`) до старта сети, автоопределение `wlan*`/`wlp*` и автопереключение по SSID (`95-pipa-mode`), рандомизация MAC при сканировании Wi-Fi (`zz-pipa-security.conf`), системный TUN VPN с DoH (`127.0.0.1:1053`) и обходом для NTP (UDP/123).
 
 ### 2. Нативный рабочий стол 11″ (`shell/`)
 - **Композитор Wayland на 2880×1800 (`DPR 2.0`, 1440×900 dp)** с приоритетом `Nice=-5`.
@@ -59,7 +59,7 @@
 
 ## Тесты и CI
 
-В **[GitHub Actions](.github/workflows/ci.yml)** автоматически прогоняются **99 Python/C++ unit-тестов** (`tools/tests/`) и **8 Node-тестов Mirror** (`mirror/tests/`) на Linux и Windows:
+В **[GitHub Actions](.github/workflows/ci.yml)** автоматически прогоняются **102 Python/C++ unit-теста** (`tools/tests/`) и **8 Node-тестов Mirror** (`mirror/tests/`) на Linux и Windows:
 
 ```sh
 python3 -m pip install -r extras/tg-bot/requirements.txt

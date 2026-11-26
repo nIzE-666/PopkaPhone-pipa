@@ -2,9 +2,9 @@
 IFACE="$1"
 ACTION="$2"
 case "$IFACE" in
-  wlp1s0)
+  wlan*|wlp*)
     case "$ACTION" in
-      up|down|connectivity-change|dhcp4-change)
+      up|down|connectivity-change|dhcp4-change|reapply)
         /usr/local/bin/pipa-mode apply --auto >/dev/null 2>&1 || true
         ;;
     esac

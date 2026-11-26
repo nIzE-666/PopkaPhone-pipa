@@ -2,6 +2,9 @@
 
 This roadmap outlines planned milestones for evolving `PopkaPhone-pipa` into a reusable, well-tested desktop Linux shell and hardware-enablement toolkit for `SM8250` / Halium 13 tablets.
 
+## Completed in v0.3.0-pipa
+- **Power, thermal & standby overhaul (portable for SM8250 / ARM64 Halium 13 tablets):** auto-discovered `policy*` tuned `ondemand` (`300/710/845 MHz` idle), UFS 3.1 `auto_hibern8`+`clkgate`, GPU `force_no_nap=0`, `bw_hwmon` caps, 10 unused Android LXC daemons + `nfcd`/`ofono` stopped, real `HWC2_POWER_MODE_OFF` (`mdss_mdp` suspend), `30 Hz` idle + UBWC + hardware Night Filter CTM, fixed screen-off `cgroup.freeze`, `quiet_therm` skin thermal governor (`39/42/45 °C`), multi-subsystem `eco/balanced/performance` profiles, dynamic `wake_lock` & opt-in `deep` (`mem`) suspend, and `wlan*`/`wlp*` auto-detection in `pipa-mode` and `tg-bot`.
+
 ## Completed in v0.2.0-pipa
 - **System audit & hardening:** clean shutdown sync hook for dual-boot (`naomi-pipa-sync`), `WebSurface` redraw fix, external IME fix, `.desktop` `TryExec`/executable validation & icon paths, `code_pin` `ENOMEM` safety, 4 GB ZRAM, unified `zz-90-naomi.conf` journald limit, and audio jack udev permissions.
 - **Travel security & DNS-leak-free VPN:** Home/Away/Auto firewall (`device/pipa-mode`, `pipa-firewall.service`, `95-pipa-mode`, `zz-pipa-security.conf`), sing-box TUN VPN with DoH + NTP bypass (`device/pipa-vpn`), and Telegram Control Hub `/mode` panel.

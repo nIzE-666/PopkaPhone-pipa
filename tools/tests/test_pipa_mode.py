@@ -85,6 +85,35 @@ class PipaModeTests(unittest.TestCase):
         self.assertIn("все порты Wi-Fi закрыты", away_desc)
         self.assertNotIn("10.1.0.0/24", away_desc)
 
+    def test_wifi_interface_autodetect_prioritizes_up_and_skips_p2p(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            for name, state, is_wifi in [
+                ("eth0", "up", False),
+                ("p2p-dev-wlan0", "up", True),
+                ("wlan1", "down", True),
+                ("wlan0", "up", True),
+                ("wlp1s0", "down", True),
+            ]:
+                d = root / name
+                d.mkdir()
+                (d / "operstate").write_text(state + "\n", encoding="utf-8")
+                if is_wifi:
+                    (d / "wireless").mkdir()
+            ifaces = pipa_mode.get_wifi_interfaces(str(root))
+            self.assertEqual(ifaces[0], "wlan0")
+            self.assertIn("wlp1s0", ifaces)
+            self.assertNotIn("p2p-dev-wlan0", ifaces)
+            self.assertNotIn("eth0", ifaces)
+
+    def test_nm_dispatcher_and_security_conf_support_wlan_and_powersave(self):
+        disp = (ROOT / "device" / "95-pipa-mode").read_text(encoding="utf-8")
+        self.assertIn("wlan*|wlp*", disp)
+        self.assertIn("reapply", disp)
+        sec = (ROOT / "device" / "zz-pipa-security.conf").read_text(encoding="utf-8")
+        self.assertIn("wifi.scan-rand-mac-address=yes", sec)
+        self.assertNotIn("wifi.powersave=2", sec)
+
 
 class PipaVpnTests(unittest.TestCase):
     def test_get_server_domains_skips_ip_literals_and_deduplicates(self):

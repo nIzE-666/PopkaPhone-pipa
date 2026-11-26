@@ -20,6 +20,8 @@ import subprocess
 import sys
 import urllib.request
 
+os.environ["PATH"] = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:" + os.environ.get("PATH", "")
+
 CFG_DIR = "/userdata/pipa-mode"
 CFG_PATH = os.path.join(CFG_DIR, "config.json")
 MODE_PATH = os.path.join(CFG_DIR, "mode")
@@ -89,17 +91,45 @@ def format_firewall_description(fw_ok: bool, active: str, home_subnets: list) ->
     return "активен (все порты Wi-Fi закрыты, только USB)"
 
 
+def get_wifi_interfaces(net_dir: str = "/sys/class/net") -> list:
+    """Return wireless interfaces (wlan*/wlp*), prioritizing UP links and skipping p2p-*."""
+    ifaces = []
+    try:
+        for name in sorted(os.listdir(net_dir)):
+            if name.startswith("p2p-"):
+                continue
+            if os.path.isdir(os.path.join(net_dir, name, "wireless")):
+                state = ""
+                try:
+                    with open(os.path.join(net_dir, name, "operstate"), encoding="utf-8") as f:
+                        state = f.read().strip()
+                except OSError:
+                    pass
+                ifaces.append((0 if state == "up" else 1, name))
+    except OSError:
+        pass
+    ifaces.sort()
+    return [name for _, name in ifaces] or ["wlan0", "wlp1s0"]
+
+
+def get_wifi_link() -> tuple:
+    ifaces = get_wifi_interfaces()
+    for iface in ifaces:
+        r = run(["iw", "dev", iface, "link"])
+        if r.returncode == 0:
+            m = re.search(r"^\s*SSID:\s*(.+)$", r.stdout, re.MULTILINE)
+            if m:
+                return iface, m.group(1).strip()
+    return ifaces[0], ""
+
+
 def get_wifi_ssid() -> str:
-    r = run(["iw", "dev", "wlp1s0", "link"])
-    if r.returncode == 0:
-        m = re.search(r"^\s*SSID:\s*(.+)$", r.stdout, re.MULTILINE)
-        if m:
-            return m.group(1).strip()
-    return ""
+    return get_wifi_link()[1]
 
 
-def get_wifi_powersave() -> str:
-    r = run(["iw", "dev", "wlp1s0", "get", "power_save"])
+def get_wifi_powersave(iface: str = "") -> str:
+    iface = iface or get_wifi_link()[0]
+    r = run(["iw", "dev", iface, "get", "power_save"])
     if r.returncode == 0:
         return r.stdout.strip().replace("Power save: ", "")
     return "n/a"
@@ -191,7 +221,7 @@ def apply_mode(trigger: str = "manual") -> str:
     need_root()
     cfg = load_cfg()
     configured = read_configured_mode()
-    ssid = get_wifi_ssid()
+    wifi_iface, ssid = get_wifi_link()
     home_ssids = cfg.get("home_ssids") or []
     home_subnets = cfg.get("home_subnets") or DEFAULT_CFG["home_subnets"]
 
@@ -209,14 +239,14 @@ def apply_mode(trigger: str = "manual") -> str:
     # Wi-Fi powersave & optional auto-VPN behavior
     if effective == "away":
         if cfg.get("away_wifi_powersave", True):
-            run(["iw", "dev", "wlp1s0", "set", "power_save", "on"])
+            run(["iw", "dev", wifi_iface, "set", "power_save", "on"])
         if cfg.get("away_auto_vpn", True) and ssid and os.path.isfile(VPN_BIN):
             tun = run(["systemctl", "is-active", "popka-vpn-tun.service"]).stdout.strip()
             prof = str(cfg.get("default_vpn_profile") or "").strip()
             if tun != "active" and prof:
                 run([VPN_BIN, "on", prof])
     else:
-        run(["iw", "dev", "wlp1s0", "set", "power_save", "off"])
+        run(["iw", "dev", wifi_iface, "set", "power_save", "off"])
 
     # Keep VPN DNS synced after any network event
     if os.path.isfile(VPN_BIN):

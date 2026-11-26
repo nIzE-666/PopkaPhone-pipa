@@ -606,12 +606,31 @@ class TabletDriver:
         txt = _read_text_safe(Path("/proc/uptime"))
         return parse_uptime(txt) if txt else None
 
+    def _wifi_candidates(self) -> List[str]:
+        candidates: List[str] = []
+        net_dir = Path("/sys/class/net")
+        if net_dir.is_dir():
+            found: List[Tuple[int, str]] = []
+            for p in sorted(net_dir.iterdir()):
+                if p.name.startswith("p2p-"):
+                    continue
+                if (p / "wireless").is_dir():
+                    state = _read_text_safe(p / "operstate") or ""
+                    found.append((0 if state == "up" else 1, p.name))
+            found.sort()
+            candidates.extend(name for _, name in found)
+        for fallback in (self.wifi_interface, "wlan0", "wlp1s0"):
+            if fallback and fallback not in candidates:
+                candidates.append(fallback)
+        return candidates
+
     async def get_wifi_ip(self) -> Optional[str]:
-        rc, out, _ = await self._run_cmd(["ip", "-4", "-o", "addr", "show", "dev", self.wifi_interface], timeout=5.0)
-        if rc == 0:
-            m = re.search(r"\binet\s+(\d+\.\d+\.\d+\.\d+)", out)
-            if m:
-                return m.group(1)
+        for iface in self._wifi_candidates():
+            rc, out, _ = await self._run_cmd(["ip", "-4", "-o", "addr", "show", "dev", iface], timeout=5.0)
+            if rc == 0:
+                m = re.search(r"\binet\s+(\d+\.\d+\.\d+\.\d+)", out)
+                if m:
+                    return m.group(1)
         return None
 
     async def get_status(self) -> Dict[str, Any]:

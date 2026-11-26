@@ -37,15 +37,15 @@ Upstream `PopkaPhone` (commit `25c1d6b`) targeted Google Pixel 5 (`redfin`, Snap
 | Subsystem | Upstream `PopkaPhone` (Pixel 5) | `PopkaPhone-pipa` (Xiaomi Pad 6) |
 |---|---|---|
 | **Target hardware & OS** | Google Pixel 5 (`redfin`, SM7250), Ubuntu Touch 24.04, full wipe | Xiaomi Pad 6 (`pipa`, SM8250), Ubuntu Touch 26.04 LTS (Halium 13), non-destructive A/B dual-boot on `_b` |
-| **Display & compositor** | Phone portrait shell + external 1280×720 desktop output, 60/90 Hz OLED | Native on-screen 11″ `2880×1800` (`1440×900 dp` at DPR 2.0) Wayland desktop, `60/90/120/144 Hz` HWC2 (adaptive `60↔120 Hz`), 4-way rotation + auto-rotate lock |
+| **Display & compositor** | Phone portrait shell + external 1280×720 desktop output, 60/90 Hz OLED | Native on-screen 11″ `2880×1800` (`1440×900 dp` at DPR 2.0) Wayland desktop, `30–144 Hz` HWC2 (adaptive `120→30 Hz` idle), UBWC compression, hardware Night Filter CTM, real `HWC2_POWER_MODE_OFF` screen-off (`mdss_mdp` suspend), 4-way rotation + lock |
 | **Tablet multitasking & UX** | Mouse/dock-centric desktop | 50/50 Split-Screen snapping, Always-on-Top PiP pinning, Clipboard History popover (`06 БУФЕР`) + PC sync, quick screenshot, `03 LINUX` `.desktop` launcher, Laptop auto-mode (USB/BT keyboard & DP-Alt detection) |
 | **Native Camera** | Not implemented | New C++/QML `naomi-camera` (`shell/apps/camera/`): back 13 MP + front 8 MP via `libhybris` `libcamera.so.1`, zoom, tap-to-focus, flash/torch, MP4 recording (`ffmpeg`), headless `--snap`/`--torch` CLI |
-| **Pro Settings** | Basic phone/desktop toggles | 24-hour/12-hour clock, seconds, warm Night Filter overlay (`0–60%`), terminal & clipboard preferences (`InterfacePage`), live SM8250 CPU governor/thermals/ZRAM/service toggles (`SystemPage`), Mouse & VPN pages |
-| **SM8250 power & tuning** | Pixel SM7250 `policy0/6/7`, Google charger nodes | `schedutil` + input boost, unlocked C-states, L3/LLCC/DDR/NPU devfreq, 4 GB `zstd` ZRAM, `read_ahead_kb=128`, PulseAudio 48 kHz, hardware 80% charge limit (`night_charging`) |
+| **Pro Settings** | Basic phone/desktop toggles | 24-hour/12-hour clock, seconds, hardware CTM warm Night Filter (`0–60%`), `Эконом / Баланс / Максимум` multi-subsystem power profiles, `Режим сервера` & `Глубокий сон (deep)` controls, live CPU/skin/battery thermals, ZRAM, service toggles, Mouse & VPN pages |
+| **SM8250 power & tuning** | Pixel SM7250 `policy0/6/7`, Google charger nodes | Auto-discovered `policy*` tuned `ondemand` (`300/710/845 MHz` idle), UFS 3.1 `auto_hibern8`+`clkgate`, Adreno 650 `force_no_nap=0` (`150 MHz` idle), `quiet_therm` skin thermal governor (`39/42/45 °C`), dynamic `wake_lock`/deep suspend, 4 GB `zstd` ZRAM, `read_ahead_kb=128`, 80% `night_charging` limit |
 | **Windows 11 Mirror** | macOS Electron viewer only | Cross-platform Windows 11 Electron client (`mirror/`, `tools/mirror_win.py`) over USB (`adb forward`) & Wi-Fi (`ssh -W`) with WebCodecs H.264/HEVC Annex B |
 | **Companion ecosystem** | None | Optional self-hosted Telegram Control Hub (`extras/tg-bot/`, 21 commands, `/mode`, `/term`, `/cam`, `/clip`, LAN DLNA server) & zero-dependency Windows LAN PC Agent (`extras/pc-agent/pc_agent.py`) |
 | **Travel security & VPN** | None | Home/Away/Auto `iptables`/`ip6tables` firewall (`device/pipa-mode`), NM SSID auto-switch + MAC scan randomization, and DNS-leak-free TUN VPN (`device/pipa-vpn`, DoH + NTP bypass) |
-| **Automated tests** | Manual device benchmarks | **99 Python unit tests** (`tools/tests/`) + **8 Node mirror tests** (`mirror/tests/`) running automatically in GitHub Actions CI |
+| **Automated tests** | Manual device benchmarks | **102 Python unit tests** (`tools/tests/`) + **8 Node mirror tests** (`mirror/tests/`) running automatically in GitHub Actions CI |
 
 ![PopkaPhone on Xiaomi Pad 6: clean 2880x1800 desktop with 24-hour top bar](docs/img/pipa-desktop.jpg)
 
